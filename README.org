@@ -1,0 +1,57 @@
+* strategic-backup
+:PROPERTIES:
+:CUSTOM_ID: strategic-backup
+:END:
+FIXME: description
+
+** Installation
+:PROPERTIES:
+:CUSTOM_ID: installation
+:END:
+Download from https://example.com/FIXME.
+
+** Usage
+:PROPERTIES:
+:CUSTOM_ID: usage
+:END:
+FIXME: explanation
+
+#+begin_example
+$ java -jar strategic-backup-0.1.0-standalone.jar [args]
+#+end_example
+
+** Options
+:PROPERTIES:
+:CUSTOM_ID: options
+:END:
+FIXME: listing of options this app accepts.
+
+** Examples
+:PROPERTIES:
+:CUSTOM_ID: examples
+:END:
+...
+
+*** Bugs
+:PROPERTIES:
+:CUSTOM_ID: bugs
+:END:
+...
+
+*** Any Other Sections
+:PROPERTIES:
+:CUSTOM_ID: any-other-sections
+:END:
+*** That You Think
+:PROPERTIES:
+:CUSTOM_ID: that-you-think
+:END:
+*** Might be Useful
+:PROPERTIES:
+:CUSTOM_ID: might-be-useful
+:END:
+** License
+:PROPERTIES:
+:CUSTOM_ID: license
+:END:
+MIT License Copyright © 2026 Tim Hawes
