@@ -54,7 +54,7 @@
   (testing "calls delete-remote! for each selected filename and reports :deleted"
     (let [deleted-calls (atom [])]
       (with-redefs [strategic-backup.upload/delete-remote!
-                    (fn [_ _ filename]
+                    (fn [_ _ filename _env]
                       (swap! deleted-calls conj filename)
                       {:ok true})]
         (let [result (retention/enforce-retention!
@@ -66,7 +66,7 @@
 (deftest enforce-retention-continues-past-individual-failures
   (testing "aggregates failures without aborting remaining deletions"
     (with-redefs [strategic-backup.upload/delete-remote!
-                  (fn [_ _ filename]
+                  (fn [_ _ filename _env]
                     (if (= filename "a")
                       {:ok false :error "network error"}
                       {:ok true}))]
@@ -79,7 +79,28 @@
   (testing "no deletions attempted when archive count is within retention"
     (let [calls (atom 0)]
       (with-redefs [strategic-backup.upload/delete-remote!
-                    (fn [_ _ _] (swap! calls inc) {:ok true})]
+                    (fn [_ _ _ _] (swap! calls inc) {:ok true})]
         (let [result (retention/enforce-retention! nil "b2:bucket" ["a" "b"] 5)]
           (is (= 0 @calls))
           (is (= {:deleted [] :failed []} result)))))))
+
+;; ---------------------------------------------------------------------------
+;; env threading (infisical-secrets spec, Requirement 3.3)
+;; ---------------------------------------------------------------------------
+
+(deftest enforce-retention-forwards-env-to-delete-remote
+  (testing "an explicit env map is forwarded to every upload/delete-remote! call"
+    (let [captured-envs (atom [])]
+      (with-redefs [strategic-backup.upload/delete-remote!
+                    (fn [_ _ _ env] (swap! captured-envs conj env) {:ok true})]
+        (retention/enforce-retention! nil "b2:bucket" ["a" "b" "c"] 1 {"RCLONE_CONFIG_B2_TYPE" "b2"})
+        (is (every? #(= {"RCLONE_CONFIG_B2_TYPE" "b2"} %) @captured-envs))
+        (is (= 2 (count @captured-envs)))))))
+
+(deftest enforce-retention-legacy-arity-uses-empty-env
+  (testing "omitting env (4-arg call) reproduces today's behavior exactly — {} forwarded"
+    (let [captured-envs (atom [])]
+      (with-redefs [strategic-backup.upload/delete-remote!
+                    (fn [_ _ _ env] (swap! captured-envs conj env) {:ok true})]
+        (retention/enforce-retention! nil "b2:bucket" ["a" "b" "c"] 1)
+        (is (every? #(= {} %) @captured-envs))))))

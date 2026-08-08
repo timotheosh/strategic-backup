@@ -9,6 +9,7 @@
    never logged or included in exception messages."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [strategic-backup.infisical :as infisical]
             [taoensso.timbre :as log]))
 
 ;; ---------------------------------------------------------------------------
@@ -36,6 +37,13 @@
 
 (def ^:private optional-secret-env-vars
   ["PGCONNSTRING"])
+
+;; ---------------------------------------------------------------------------
+;; Required :infisical config-map keys (infisical-secrets spec, Requirement 1)
+;; ---------------------------------------------------------------------------
+
+(def ^:private required-infisical-config-keys
+  [:project-id])
 
 ;; ---------------------------------------------------------------------------
 ;; Internal env-var lookup (rebindable for testing)
@@ -91,6 +99,19 @@
   [config]
   (filterv #(not (contains? config %)) required-config-keys))
 
+(defn infisical-mode?
+  "Calculation. True only when :secret-store is explicitly :infisical
+   (infisical-secrets spec, Requirement 1.1)."
+  [config]
+  (= :infisical (:secret-store config)))
+
+(defn missing-infisical-config-keys
+  "Calculation. Returns a vector of all keys from
+   `required-infisical-config-keys` absent from `infisical-config` (which
+   may itself be nil — treated the same as an empty map)."
+  [infisical-config]
+  (filterv #(not (contains? infisical-config %)) required-infisical-config-keys))
+
 (defn validate-config
   "Validate that `config` contains all required keys.
 
@@ -104,7 +125,86 @@
       (log/error "Config validation failed. Missing keys:" missing)
       (throw (ex-info "Config is missing required keys"
                       {:missing-keys missing}))))
+  ;; infisical-secrets spec, Requirement 1.3. Only ever runs when
+  ;; :secret-store is :infisical — when absent (the legacy-only case),
+  ;; this block is skipped entirely, so behavior is byte-identical to
+  ;; before this feature existed (Requirement 5.2).
+  (when (infisical-mode? config)
+    (let [missing-infisical (missing-infisical-config-keys (:infisical config))]
+      (when (seq missing-infisical)
+        (log/error "Config validation failed. Missing Infisical config keys:" missing-infisical)
+        (throw (ex-info "Config is missing required Infisical keys"
+                        {:missing-infisical-keys missing-infisical})))))
   config)
+
+(defn credential-source
+  "Calculation — the credential-source decision table (infisical-secrets
+   spec, Requirements 2.1-2.2, 3.1-3.2). A present `env-value` always wins
+   regardless of `infisical-mode?` (legacy precedence, the feature's Core
+   Principle). Shared by both the database and B2 credential resolvers —
+   the decision logic is identical for both."
+  [env-value infisical-mode?]
+  (cond
+    (some? env-value) :env
+    infisical-mode?   :infisical
+    :else              :missing))
+
+(defn resolve-db-credential!
+  "Action (infisical-secrets spec, Requirements 2.1-2.5). Resolves the
+   database connection string. `env-map` has \"PGCONNSTRING\" already read
+   via getenv; `infisical-config` is the :infisical config map, or nil
+   when not in Infisical mode.
+
+   NEVER throws — a legacy env value wins if present; otherwise, when in
+   Infisical mode, fetches secret \"PGCONNSTRING\". Any failure to resolve
+   a value at all — env absent and not in Infisical mode, OR the Infisical
+   fetch itself failing for any reason (not-found, auth failure, network
+   error, ...) — logs a warning and returns nil, exactly like today's
+   PGCONNSTRING-absent behavior. Database persistence stays optional even
+   under Infisical mode — the base spec's Core Principle must hold here."
+  [env-map infisical-config]
+  (let [env-value (get env-map "PGCONNSTRING")]
+    (case (credential-source env-value (some? infisical-config))
+      :env
+      env-value
+
+      :infisical
+      (try
+        (infisical/fetch-secret! infisical-config "PGCONNSTRING")
+        (catch clojure.lang.ExceptionInfo e
+          (log/warn "Infisical fetch for PGCONNSTRING failed — PostgreSQL persistence will be skipped:"
+                    (.getMessage e))
+          nil))
+
+      :missing
+      (do
+        (log/warn "PGCONNSTRING not set — PostgreSQL persistence will be skipped")
+        nil))))
+
+(defn resolve-b2-credential!
+  "Action (infisical-secrets spec, Requirements 3.1-3.4). Resolves B2
+   credentials. `env-map` has \"RCLONE_CONFIG\" already read via getenv;
+   `infisical-config` is the :infisical config map, or nil when not in
+   Infisical mode.
+
+   Unlike resolve-db-credential! above, this always fails loudly — B2
+   access is required for the backup pipeline to function at all. Throws
+   ex-info {:stage :secrets} when there's no legacy fallback and either
+   Infisical mode isn't active, or the Infisical fetch itself fails."
+  [env-map infisical-config]
+  (let [env-value (get env-map "RCLONE_CONFIG")]
+    (case (credential-source env-value (some? infisical-config))
+      :env
+      {:mode :rclone-config-file}
+
+      :infisical
+      (let [key-id  (infisical/fetch-secret! infisical-config "B2_KEY_ID")
+            app-key (infisical/fetch-secret! infisical-config "B2_APPLICATION_KEY")]
+        {:mode :infisical :env (infisical/b2-rclone-env-vars key-id app-key)})
+
+      :missing
+      (throw (ex-info "Unable to resolve B2 credential — no RCLONE_CONFIG and Infisical mode not active"
+                      {:stage :secrets :credential "B2_KEY_ID"})))))
 
 (defn read-secret-env-vars
   "Reads every required and optional secret env var (via `getenv`) into a
@@ -141,14 +241,37 @@
 
    Throws ex-info with :missing-secrets listing ALL missing required secret
    names when any required secret is absent. Secret values are NEVER included
-   in any log output or exception message."
+   in any log output or exception message.
+
+   When (infisical-mode? config) is true, this instead resolves
+   :pg-conn-string and :b2-rclone-env via resolve-db-credential!/
+   resolve-b2-credential! (infisical-secrets spec, Requirements 2, 3, 5).
+   BACKUP_ENCRYPTION_KEY remains required from the environment either way
+   (Requirement 5.1). The legacy-only branch below is untouched — byte-for-
+   byte identical to this function's behavior before that feature existed
+   (Requirement 5.2)."
   [config]
-  (let [env-map (read-secret-env-vars)
-        missing (missing-required-secrets env-map)]
-    (when (seq missing)
-      (log/error "Missing required secrets (env vars):" missing)
-      (throw (ex-info "Missing required secrets"
-                      {:missing-secrets missing})))
-    (when (nil? (get env-map "PGCONNSTRING"))
-      (log/warn "PGCONNSTRING not set — PostgreSQL persistence will be skipped"))
-    (assoc config :secrets (build-secrets-map env-map))))
+  (if (infisical-mode? config)
+    (let [encryption-key (getenv "BACKUP_ENCRYPTION_KEY")]
+      (when (nil? encryption-key)
+        (log/error "Missing required secrets (env vars):" ["BACKUP_ENCRYPTION_KEY"])
+        (throw (ex-info "Missing required secrets"
+                        {:missing-secrets ["BACKUP_ENCRYPTION_KEY"]})))
+      (let [infisical-cfg  (:infisical config)
+            rclone-config  (getenv "RCLONE_CONFIG")
+            pg-conn-string (resolve-db-credential! {"PGCONNSTRING" (getenv "PGCONNSTRING")} infisical-cfg)
+            b2-result      (resolve-b2-credential! {"RCLONE_CONFIG" rclone-config} infisical-cfg)]
+        (assoc config :secrets
+               {:encryption-key encryption-key
+                :rclone-config  rclone-config
+                :pg-conn-string pg-conn-string
+                :b2-rclone-env  (if (= :infisical (:mode b2-result)) (:env b2-result) {})})))
+    (let [env-map (read-secret-env-vars)
+          missing (missing-required-secrets env-map)]
+      (when (seq missing)
+        (log/error "Missing required secrets (env vars):" missing)
+        (throw (ex-info "Missing required secrets"
+                        {:missing-secrets missing})))
+      (when (nil? (get env-map "PGCONNSTRING"))
+        (log/warn "PGCONNSTRING not set — PostgreSQL persistence will be skipped"))
+      (assoc config :secrets (build-secrets-map env-map)))))

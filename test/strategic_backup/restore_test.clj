@@ -123,7 +123,7 @@
       (try
         (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] sample-manifest)
                       strategic-backup.manifest/latest-local-edn        (fn [_] nil)
-                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir]
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
                                                                           (spit (str dir "/" (:archive-file sample-manifest)) "data")
                                                                           nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
@@ -143,13 +143,35 @@
       (try
         (with-redefs [strategic-backup.db/fetch-latest-manifest      (fn [_ _] nil)
                       strategic-backup.manifest/latest-local-edn     (fn [_] nil)
-                      strategic-backup.upload/list-remote            (fn [_ _] ["x-2026-01-01T000000.zfs.gz"])
-                      strategic-backup.upload/download-archive!      (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote            (fn [_ _ & _env] ["x-2026-01-01T000000.zfs.gz"])
+                      strategic-backup.upload/download-archive!      (fn [_ _ _ _ & _env] nil)
                       strategic-backup.restore/run-restore-pipeline! (fn [_ _] nil)
                       strategic-backup.verify/verify-file-checksums! (fn [_ _ _] (reset! verify-called true) {:ok true})
                       strategic-backup.snapshot/destroy-dataset!     (fn [_ _] nil)]
           (restore/run-restore-test! config (ok-executor) true))
         (is (false? @verify-called))
+        (finally (delete-dir staging))))))
+
+(deftest run-restore-test-passes-b2-rclone-env-to-upload-calls
+  (testing "the resolved :b2-rclone-env (infisical-secrets spec, Requirement 3.3) is threaded to list-remote and download-archive!"
+    (let [captured-envs (atom [])
+          staging       (make-temp-dir)
+          b2-env        {"RCLONE_CONFIG_B2_TYPE" "b2"}
+          config        (-> base-config
+                            (assoc :staging-dir (.getAbsolutePath staging))
+                            (assoc-in [:secrets :b2-rclone-env] b2-env))]
+      (try
+        (with-redefs [strategic-backup.db/fetch-latest-manifest      (fn [_ _] nil)
+                      strategic-backup.manifest/latest-local-edn     (fn [_] nil)
+                      strategic-backup.upload/list-remote
+                      (fn [_ _ env] (swap! captured-envs conj env) ["x-2026-01-01T000000.zfs.gz"])
+                      strategic-backup.upload/download-archive!
+                      (fn [_ _ _ _ env] (swap! captured-envs conj env) nil)
+                      strategic-backup.restore/run-restore-pipeline! (fn [_ _] nil)
+                      strategic-backup.snapshot/destroy-dataset!     (fn [_ _] nil)]
+          (restore/run-restore-test! config (ok-executor) true))
+        (is (= 2 (count @captured-envs)))
+        (is (every? #(= b2-env %) @captured-envs))
         (finally (delete-dir staging))))))
 
 (deftest run-restore-test-cleans-up-on-stream-checksum-mismatch
@@ -160,7 +182,7 @@
       (try
         (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] sample-manifest)
                       strategic-backup.manifest/latest-local-edn        (fn [_] nil)
-                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir]
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
                                                                           (spit (str dir "/" (:archive-file sample-manifest)) "data")
                                                                           nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:WRONG")
@@ -182,7 +204,7 @@
       (try
         (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] sample-manifest)
                       strategic-backup.manifest/latest-local-edn        (fn [_] nil)
-                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir]
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
                                                                           (spit (str dir "/" (:archive-file sample-manifest)) "data")
                                                                           nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
@@ -205,7 +227,7 @@
       (try
         (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] sample-manifest)
                       strategic-backup.manifest/latest-local-edn        (fn [_] nil)
-                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir]
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
                                                                           (spit (str dir "/" (:archive-file sample-manifest)) "data")
                                                                           nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
@@ -224,7 +246,7 @@
   (testing "throws ex-info :stage :restore when there is nothing to restore"
     (with-redefs [strategic-backup.db/fetch-latest-manifest  (fn [_ _] nil)
                   strategic-backup.manifest/latest-local-edn (fn [_] nil)
-                  strategic-backup.upload/list-remote        (fn [_ _] [])]
+                  strategic-backup.upload/list-remote        (fn [_ _ & _env] [])]
       (try
         (restore/run-restore-test! base-config (ok-executor) false)
         (is false "expected ex-info to be thrown")

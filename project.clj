@@ -9,7 +9,8 @@
                  [com.github.seancorfield/next.jdbc "1.3.939"]
                  [org.clojure/data.json "2.5.1"]
                  [org.clojure/test.check "1.1.1"]
-                 [clojure.java-time/clojure.java-time "1.4.2"]]
+                 [clojure.java-time/clojure.java-time "1.4.2"]
+                 [io.github.timotheosh/clj-infisical "0.1.0"]]
   :main ^:skip-aot strategic-backup.core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all

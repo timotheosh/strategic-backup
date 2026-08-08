@@ -87,6 +87,8 @@
         b2-remote      (upload/remote-target (:b2-bucket config) (:b2-path-prefix config))
         cipher         (:encryption-cipher config)
         pg-conn-string (get-in config [:secrets :pg-conn-string])
+        ;; infisical-secrets spec, Requirement 3.3 — see core.clj's run-backup!
+        b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})
 
         pg-manifest    (db/fetch-latest-manifest pg-conn-string dataset)
         local-manifest (manifest/latest-local-edn staging-dir)
@@ -95,7 +97,7 @@
     (log/info "Starting restore test" {:mode mode})
 
     (let [archive-fname (if (= mode 3)
-                          (latest-archive (upload/list-remote executor b2-remote))
+                          (latest-archive (upload/list-remote executor b2-remote b2-rclone-env))
                           (:archive-file manifest))]
       (when (nil? archive-fname)
         (throw (ex-info "No archive available to restore"
@@ -105,7 +107,7 @@
             compression  (if (= mode 3) (infer-compression archive-fname) (:compression manifest))
             decrypt?     (requires-openssl-decryption? mode manifest archive-fname)]
         (try
-          (upload/download-archive! executor b2-remote archive-fname staging-dir)
+          (upload/download-archive! executor b2-remote archive-fname staging-dir b2-rclone-env)
 
           ;; Req 7.5/7.6 — verify the stream checksum before touching the
           ;; archive at all; a mismatch aborts before decrypt/decompress.
