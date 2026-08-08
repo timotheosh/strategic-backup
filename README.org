@@ -2,54 +2,212 @@
 :PROPERTIES:
 :CUSTOM_ID: strategic-backup
 :END:
-FIXME: description
+strategic-backup automates nightly ZFS snapshot backups from an OmniOS
+host to Backblaze B2, plus weekly automated restore tests that actually
+verify a backup can be recovered — not just that an upload succeeded.
+
+Pipeline: ~zfs snapshot~ → per-file SHA-256 checksums → ~zfs send -w~
+piped through ~gzip~ and, unless the source dataset is already
+ZFS-encrypted, ~openssl enc~ → uploaded to B2 via ~rclone~ → remote
+retention enforced → an EDN manifest written locally and optionally
+persisted to PostgreSQL/CockroachDB (a convenience index only — the tool
+is fully operational without a database).
+
+Only OmniOS-native tooling is used: ~zfs~, ~openssl~, ~gzip~, ~rclone~,
+and POSIX shell. No Linux-specific commands.
 
 ** Installation
 :PROPERTIES:
 :CUSTOM_ID: installation
 :END:
-Download from https://example.com/FIXME.
+Requires a JDK and [[https://leiningen.org/][Leiningen]]. Build a standalone uberjar:
+
+#+begin_example
+$ lein uberjar
+Created target/uberjar/strategic-backup-0.1.0-SNAPSHOT.jar
+Created target/uberjar/strategic-backup.jar
+#+end_example
+
+~strategic-backup.jar~ is the one to deploy — it bundles every dependency
+(Clojure, next.jdbc, timbre, clj-infisical, etc.). Its filename is fixed
+(~:uberjar-name~ in =project.clj=, not the default
+~<name>-<version>-standalone.jar~) precisely so it stays the same across
+version bumps — cron entries, wrapper scripts, and deploy tooling never
+need to change or glob for it. Copy it to wherever it'll run, e.g.
+~/opt/strategic-backup/strategic-backup.jar~, overwriting the previous
+version in place on each deploy.
+
+** Configuration
+:PROPERTIES:
+:CUSTOM_ID: configuration
+:END:
+Configuration is an EDN file. Its path comes from the
+~STRATEGIC_BACKUP_CONFIG~ environment variable, defaulting to
+~/etc/strategic-backup/config.edn~.
+
+#+begin_example
+{:dataset                  "tank/syncthing"
+ :test-dataset             "tank/restore-test"
+ :staging-dir              "/var/backup/staging"
+ :b2-bucket                "my-b2-bucket"
+ :b2-path-prefix           "zfs-backups/"
+ :retention-count          7
+ :local-manifest-retention 14
+ :compression              "gzip"
+ :encryption-cipher        "aes-256-cbc"
+ :snapshot-prefix          "backup"}
+#+end_example
+
+All keys above are required — a missing or unparseable config file, or a
+config missing any of these keys, aborts the run with every missing key
+logged at once.
+
+*** Secrets
+:PROPERTIES:
+:CUSTOM_ID: secrets
+:END:
+Secrets are never stored in the config file. By default they're read
+from environment variables:
+
+| Variable                 | Required? | Purpose                                              |
+|---------------------------+-----------+-------------------------------------------------------|
+| ~BACKUP_ENCRYPTION_KEY~   | Yes       | ~openssl enc~ passphrase (via ~-pass env:~, never argv) |
+| ~RCLONE_CONFIG~           | Yes\*     | Path to an rclone config file with a B2 remote        |
+| ~PGCONNSTRING~            | No        | Postgres/CockroachDB connection string (JDBC-style)   |
+
+\* Not required if using Infisical mode for B2 credentials — see below.
+
+**** Optional: Infisical for database and B2 credentials
+:PROPERTIES:
+:CUSTOM_ID: optional-infisical
+:END:
+~PGCONNSTRING~ and B2 credentials can instead be resolved from
+[[https://infisical.com][Infisical]] at startup. This is opt-in and purely additive — an env var
+present at runtime always wins over Infisical for that credential.
+
+Add to ~config.edn~:
+
+#+begin_example
+{...
+ :secret-store :infisical
+ :infisical    {:project-id  "<infisical-project-id>"
+                :environment "prod"        ; optional, default "dev"
+                :secret-path "/"           ; optional, default "/"
+                :site-url    "https://app.infisical.com"} ; optional, self-hosted only
+ }
+#+end_example
+
+Infisical's own client credentials (~INFISICAL_CLIENT_ID~ /
+~INFISICAL_CLIENT_SECRET~, or ~/etc/infisical/client_id~ /
+~/etc/infisical/client_secret~) are resolved by
+[[https://clojars.org/io.github.timotheosh/clj-infisical][clj-infisical]] itself and are never read from ~config.edn~.
+
+Store these secrets in the Infisical project when using this mode:
+~PGCONNSTRING~, ~B2_KEY_ID~, ~B2_APPLICATION_KEY~. A missing or failed
+~PGCONNSTRING~ fetch just disables database persistence (logged, never
+fatal — the database is always optional). A missing or failed B2 fetch
+*does* abort the run, since the backup can't reach the remote without it.
 
 ** Usage
 :PROPERTIES:
 :CUSTOM_ID: usage
 :END:
-FIXME: explanation
-
 #+begin_example
-$ java -jar strategic-backup-0.1.0-standalone.jar [args]
+$ java -jar strategic-backup.jar backup
+$ java -jar strategic-backup.jar restore-test [--skip-verify]
 #+end_example
 
-** Options
-:PROPERTIES:
-:CUSTOM_ID: options
-:END:
-FIXME: listing of options this app accepts.
+- ~backup~ :: runs the full backup pipeline described above.
+- ~restore-test~ :: downloads the latest backup, decrypts/decompresses it,
+  ~zfs receive~s it into ~:test-dataset~, verifies every file's checksum
+  against the manifest, then always destroys the test dataset and deletes
+  the downloaded archive — pass or fail. Falls back gracefully: manifest
+  from PostgreSQL/CockroachDB, else the newest local EDN manifest, else
+  (or with ~--skip-verify~) restores the latest archive with no
+  verification at all, clearly logged as skipped.
 
-** Examples
-:PROPERTIES:
-:CUSTOM_ID: examples
-:END:
-...
+Exit code is ~0~ on success, non-zero on any failure — pipe stage, config
+error, or verification failure — so a scheduler can detect and alert on it.
 
-*** Bugs
+** Scheduling with cron
 :PROPERTIES:
-:CUSTOM_ID: bugs
+:CUSTOM_ID: scheduling-with-cron
 :END:
-...
+strategic-backup is a one-shot command, not a daemon, so it's driven by
+the scheduler running it — cron or SMF. cron's environment is minimal, so
+don't rely on your login shell's env being visible to it: use a small
+wrapper script that sources a locked-down env file before invoking the jar.
 
-*** Any Other Sections
+*** 1. Env file
 :PROPERTIES:
-:CUSTOM_ID: any-other-sections
+:CUSTOM_ID: env-file
 :END:
-*** That You Think
+~/etc/strategic-backup/env~, owned by the service account, mode 600:
+
+#+begin_example
+BACKUP_ENCRYPTION_KEY=<your key>
+RCLONE_CONFIG=/etc/strategic-backup/rclone.conf
+PGCONNSTRING=postgres://user:pass@localhost:26257/backups
+STRATEGIC_BACKUP_CONFIG=/etc/strategic-backup/config.edn
+#+end_example
+
+(Omit ~RCLONE_CONFIG~/~PGCONNSTRING~ here if using Infisical mode instead —
+then set ~INFISICAL_CLIENT_ID~/~INFISICAL_CLIENT_SECRET~ instead.)
+
+#+begin_example
+$ chmod 600 /etc/strategic-backup/env
+$ chown backup-svc:backup-svc /etc/strategic-backup/env
+#+end_example
+
+*** 2. Wrapper script
 :PROPERTIES:
-:CUSTOM_ID: that-you-think
+:CUSTOM_ID: wrapper-script
 :END:
-*** Might be Useful
+~/usr/local/bin/strategic-backup-run~, mode 755:
+
+#+begin_example
+#!/bin/sh
+set -a
+. /etc/strategic-backup/env
+set +a
+exec /usr/bin/java -jar /opt/strategic-backup/strategic-backup.jar "$@"
+#+end_example
+
+*** 3. Crontab
 :PROPERTIES:
-:CUSTOM_ID: might-be-useful
+:CUSTOM_ID: crontab
 :END:
+As the ~backup-svc~ user (~crontab -e~), nightly backup at 02:00 and a
+weekly restore test Sunday at 03:00:
+
+#+begin_example
+0 2 * * *  /usr/local/bin/strategic-backup-run backup        >> /var/log/strategic-backup/backup.log 2>&1
+0 3 * * 0  /usr/local/bin/strategic-backup-run restore-test   >> /var/log/strategic-backup/restore-test.log 2>&1
+#+end_example
+
+Make sure ~/var/log/strategic-backup~ exists and is writable by that user,
+and that a real logrotate/newsyslog-equivalent is watching those files —
+neither cron nor the jar rotates them.
+
+*** Alternative: SMF
+:PROPERTIES:
+:CUSTOM_ID: alternative-smf
+:END:
+If you'd rather manage this as an SMF service than a crontab entry, the
+same env vars can be set on the service instance directly instead of the
+env-file/wrapper-script approach above:
+
+#+begin_example
+$ svccfg -s svc:/site/strategic-backup:default setenv BACKUP_ENCRYPTION_KEY '...'
+$ svccfg -s svc:/site/strategic-backup:default setenv RCLONE_CONFIG '/etc/strategic-backup/rclone.conf'
+#+end_example
+
+illumos SMF has no built-in periodic/timer primitive equivalent to
+systemd timers, so a transient SMF service still needs something
+(typically cron) to trigger it on a schedule — SMF alone doesn't replace
+cron's role here, it only replaces the env-file/wrapper-script for secret
+injection.
+
 ** License
 :PROPERTIES:
 :CUSTOM_ID: license
