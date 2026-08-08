@@ -38,14 +38,21 @@
    selected by `select-for-deletion`, continuing past individual deletion
    failures rather than aborting (Req 5.5).
 
+   `env` (infisical-secrets spec, Requirement 3.3) is forwarded to every
+   `upload/delete-remote!` call — e.g. the RCLONE_CONFIG_B2_* vars when B2
+   credentials came from Infisical. Omitting it (or passing {}) reproduces
+   today's behavior exactly.
+
    Returns {:deleted [filename ...] :failed [{:filename .. :error ..} ...]}."
-  [executor remote sorted-filenames retention-count]
-  (let [to-delete (select-for-deletion sorted-filenames retention-count)]
-    (reduce
-     (fn [acc filename]
-       (let [result (upload/delete-remote! executor remote filename)]
-         (if (:ok result)
-           (update acc :deleted conj filename)
-           (update acc :failed conj {:filename filename :error (:error result)}))))
-     {:deleted [] :failed []}
-     to-delete)))
+  ([executor remote sorted-filenames retention-count]
+   (enforce-retention! executor remote sorted-filenames retention-count {}))
+  ([executor remote sorted-filenames retention-count env]
+   (let [to-delete (select-for-deletion sorted-filenames retention-count)]
+     (reduce
+      (fn [acc filename]
+        (let [result (upload/delete-remote! executor remote filename env)]
+          (if (:ok result)
+            (update acc :deleted conj filename)
+            (update acc :failed conj {:filename filename :error (:error result)}))))
+      {:deleted [] :failed []}
+      to-delete))))

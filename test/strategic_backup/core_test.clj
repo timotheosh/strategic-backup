@@ -63,10 +63,10 @@
                                                                                "/" (:archive-file m)))
                       strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
                       strategic-backup.upload/rclone-copy!
-                      (fn [_ local-path remote]
+                      (fn [_ local-path remote _env]
                         (swap! upload-calls conj {:local local-path :remote remote}))
-                      strategic-backup.upload/list-remote               (fn [_ _] [])
-                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
           (core/run-backup! config (ok-executor)))
         (is (= 1 (count @upload-calls)))
@@ -91,9 +91,9 @@
                                                                                (:archive-file m) ".manifest.edn"))
                       strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
                       strategic-backup.upload/rclone-copy!
-                      (fn [_ local-path _remote] (reset! upload-args local-path))
-                      strategic-backup.upload/list-remote               (fn [_ _] [])
-                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _] {:deleted [] :failed []})
+                      (fn [_ local-path _remote _env] (reset! upload-args local-path))
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
           (core/run-backup! config (ok-executor)))
         ;; The uploaded file must NOT be the EDN manifest
@@ -117,9 +117,9 @@
                       ;; DB fails
                       strategic-backup.db/persist-manifest!
                       (fn [_ _] (throw (ex-info "DB unavailable" {:stage :db})))
-                      strategic-backup.upload/rclone-copy!              (fn [_ _ _] nil)
-                      strategic-backup.upload/list-remote               (fn [_ _] [])
-                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.upload/rclone-copy!              (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!
                       (fn [_ _] (reset! backup-completed true) 0)]
           (core/run-backup! config (ok-executor)))
@@ -149,9 +149,9 @@
                                                                           (str (.getAbsolutePath staging) "/"
                                                                                (:archive-file m) ".manifest.edn"))
                       strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
-                      strategic-backup.upload/rclone-copy!              (fn [_ _ _] nil)
-                      strategic-backup.upload/list-remote               (fn [_ _] [])
-                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.upload/rclone-copy!              (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
           (core/run-backup! config (ok-executor)))
         ;; Archive file must be deleted
@@ -177,9 +177,9 @@
                           (spit path (pr-str m))
                           path))
                       strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
-                      strategic-backup.upload/rclone-copy!              (fn [_ _ _] nil)
-                      strategic-backup.upload/list-remote               (fn [_ _] [])
-                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.upload/rclone-copy!              (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
           (core/run-backup! config (ok-executor)))
         ;; EDN file must still exist
@@ -196,13 +196,44 @@
                                :retention-count 0)]
       (try
         (with-redefs [strategic-backup.upload/rclone-copy!
-                      (fn [_ _ _] (reset! upload-called true))]
+                      (fn [_ _ _ _] (reset! upload-called true))]
           (try
             (core/run-backup! config (ok-executor))
             (is false "expected ex-info to be thrown")
             (catch clojure.lang.ExceptionInfo e
               (is (= :config (:stage (ex-data e))))
               (is (false? @upload-called)))))
+        (finally (delete-dir staging))))))
+
+(deftest backup-passes-b2-rclone-env-to-upload-and-retention-calls
+  (testing "the resolved :b2-rclone-env (infisical-secrets spec, Requirement 3.3) is threaded through to every upload/retention call"
+    (let [captured-envs (atom [])
+          staging       (make-temp-dir)
+          b2-env        {"RCLONE_CONFIG_B2_TYPE"    "b2"
+                         "RCLONE_CONFIG_B2_ACCOUNT" "key-id"
+                         "RCLONE_CONFIG_B2_KEY"     "app-key"}
+          config        (-> base-config
+                            (assoc :staging-dir (.getAbsolutePath staging))
+                            (assoc-in [:secrets :b2-rclone-env] b2-env))]
+      (try
+        (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
+                      strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
+                      strategic-backup.manifest/write-edn!              (fn [m _]
+                                                                          (str (.getAbsolutePath staging) "/" (:archive-file m)))
+                      strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
+                      strategic-backup.upload/rclone-copy!
+                      (fn [_ _ _ env] (swap! captured-envs conj env))
+                      strategic-backup.upload/list-remote
+                      (fn [_ _ env] (swap! captured-envs conj env) [])
+                      strategic-backup.retention/enforce-retention!
+                      (fn [_ _ _ _ env] (swap! captured-envs conj env) {:deleted [] :failed []})
+                      strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
+          (core/run-backup! config (ok-executor)))
+        (is (= 3 (count @captured-envs)))
+        (is (every? #(= b2-env %) @captured-envs))
         (finally (delete-dir staging))))))
 
 ;; ---------------------------------------------------------------------------

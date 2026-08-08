@@ -66,6 +66,24 @@
     (is (nil? (upload/rclone-copy! (ok-executor) "/staging/archive.enc" "b2:bucket")))))
 
 ;; ---------------------------------------------------------------------------
+;; env threading (infisical-secrets spec, Requirement 3.3)
+;; ---------------------------------------------------------------------------
+
+(deftest rclone-copy-forwards-env-to-shell-run-cmd
+  (testing "an explicit env map is forwarded into shell/run-cmd's opts"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/rclone-copy! nil "/local" "b2:bucket" {"RCLONE_CONFIG_B2_TYPE" "b2"})
+        (is (= {:env {"RCLONE_CONFIG_B2_TYPE" "b2"}} @captured-opts))))))
+
+(deftest rclone-copy-legacy-arity-uses-empty-env
+  (testing "omitting env (3-arg call) reproduces today's behavior exactly — {:env {}}"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/rclone-copy! nil "/local" "b2:bucket")
+        (is (= {:env {}} @captured-opts))))))
+
+;; ---------------------------------------------------------------------------
 ;; parse-lsf-output (pure calculation extracted from list-remote)
 ;; ---------------------------------------------------------------------------
 
@@ -78,6 +96,20 @@
 ;; ---------------------------------------------------------------------------
 ;; list-remote
 ;; ---------------------------------------------------------------------------
+
+(deftest list-remote-forwards-env-to-shell-run-cmd
+  (testing "an explicit env map is forwarded into shell/run-cmd's opts"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/list-remote nil "b2:bucket" {"RCLONE_CONFIG_B2_TYPE" "b2"})
+        (is (= {:env {"RCLONE_CONFIG_B2_TYPE" "b2"}} @captured-opts))))))
+
+(deftest list-remote-legacy-arity-uses-empty-env
+  (testing "omitting env (2-arg call) reproduces today's behavior exactly — {:env {}}"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/list-remote nil "b2:bucket")
+        (is (= {:env {}} @captured-opts))))))
 
 (deftest list-remote-parses-rclone-lsf-output
   (testing "parses rclone lsf output into a sequence of filename strings"
@@ -114,6 +146,20 @@
   (testing "does not throw on exit 0"
     (is (nil? (upload/download-archive! (ok-executor) "b2:bucket" "archive.zfs.gz.enc" "/staging")))))
 
+(deftest download-archive-forwards-env-to-shell-run-cmd
+  (testing "an explicit env map is forwarded into shell/run-cmd's opts"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/download-archive! nil "b2:bucket" "archive.zfs.gz.enc" "/staging" {"RCLONE_CONFIG_B2_TYPE" "b2"})
+        (is (= {:env {"RCLONE_CONFIG_B2_TYPE" "b2"}} @captured-opts))))))
+
+(deftest download-archive-legacy-arity-uses-empty-env
+  (testing "omitting env (4-arg call) reproduces today's behavior exactly — {:env {}}"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/download-archive! nil "b2:bucket" "archive.zfs.gz.enc" "/staging")
+        (is (= {:env {}} @captured-opts))))))
+
 ;; ---------------------------------------------------------------------------
 ;; delete-remote!
 ;; ---------------------------------------------------------------------------
@@ -130,3 +176,17 @@
   (testing "returns {:ok true} on exit 0"
     (let [result (upload/delete-remote! (ok-executor) "b2:bucket" "archive.zfs.gz.enc")]
       (is (= {:ok true} result)))))
+
+(deftest delete-remote-forwards-env-to-shell-run-cmd
+  (testing "an explicit env map is forwarded into shell/run-cmd's opts"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/delete-remote! nil "b2:bucket" "archive.zfs.gz.enc" {"RCLONE_CONFIG_B2_TYPE" "b2"})
+        (is (= {:env {"RCLONE_CONFIG_B2_TYPE" "b2"}} @captured-opts))))))
+
+(deftest delete-remote-legacy-arity-uses-empty-env
+  (testing "omitting env (3-arg call) reproduces today's behavior exactly — {:env {}}"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/delete-remote! nil "b2:bucket" "archive.zfs.gz.enc")
+        (is (= {:env {}} @captured-opts))))))

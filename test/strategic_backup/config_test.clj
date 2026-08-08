@@ -6,7 +6,8 @@
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [strategic-backup.config :as config]
-            [strategic-backup.generators :as gens])
+            [strategic-backup.generators :as gens]
+            [strategic-backup.infisical :as infisical])
   (:import (java.io File)))
 
 ;; ---------------------------------------------------------------------------
@@ -103,6 +104,158 @@
       (is (= extended (config/validate-config extended))))))
 
 ;; ---------------------------------------------------------------------------
+;; infisical-mode? / missing-infisical-config-keys
+;; (infisical-secrets spec, Requirement 1)
+;; ---------------------------------------------------------------------------
+
+(deftest infisical-mode-true-only-when-secret-store-is-infisical
+  (testing "true when :secret-store is :infisical"
+    (is (true? (config/infisical-mode? {:secret-store :infisical}))))
+  (testing "false when :secret-store is absent"
+    (is (false? (config/infisical-mode? {}))))
+  (testing "false when :secret-store is some other value"
+    (is (false? (config/infisical-mode? {:secret-store :vault})))))
+
+(deftest missing-infisical-config-keys-reports-absent-project-id
+  (testing "reports :project-id when absent"
+    (is (= [:project-id] (config/missing-infisical-config-keys {}))))
+  (testing "reports :project-id when the :infisical map itself is nil"
+    (is (= [:project-id] (config/missing-infisical-config-keys nil))))
+  (testing "empty when :project-id present"
+    (is (= [] (config/missing-infisical-config-keys {:project-id "proj-123"})))))
+
+;; ---------------------------------------------------------------------------
+;; validate-config: :infisical map validation (Requirement 1.3)
+;; ---------------------------------------------------------------------------
+
+(deftest validate-config-passes-through-unchanged-when-secret-store-absent
+  (testing "byte-identical behavior to before this feature existed (Requirement 5.2)"
+    (is (= valid-config (config/validate-config valid-config)))))
+
+(deftest validate-config-throws-for-missing-infisical-project-id
+  (testing "throws a separate ex-info when :secret-store is :infisical and :project-id is missing"
+    (let [cfg (assoc valid-config :secret-store :infisical :infisical {})]
+      (try
+        (config/validate-config cfg)
+        (is false "expected ex-info to be thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= [:project-id] (:missing-infisical-keys (ex-data e))))))))
+  (testing "throws when the :infisical map itself is entirely absent"
+    (let [cfg (assoc valid-config :secret-store :infisical)]
+      (try
+        (config/validate-config cfg)
+        (is false "expected ex-info to be thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= [:project-id] (:missing-infisical-keys (ex-data e)))))))))
+
+(deftest validate-config-passes-when-infisical-project-id-present
+  (testing "does not throw when :secret-store is :infisical and :project-id is present"
+    (let [cfg (assoc valid-config :secret-store :infisical :infisical {:project-id "proj-123"})]
+      (is (= cfg (config/validate-config cfg))))))
+
+;; ---------------------------------------------------------------------------
+;; credential-source (infisical-secrets spec, Requirements 2.1-2.2, 3.1-3.2)
+;; ---------------------------------------------------------------------------
+
+(deftest credential-source-env-wins-regardless-of-infisical-mode
+  (testing "env value present => :env, even when infisical-mode? is true (legacy precedence, Core Principle)"
+    (is (= :env (config/credential-source "some-value" true)))
+    (is (= :env (config/credential-source "some-value" false)))))
+
+(deftest credential-source-infisical-when-env-absent-and-mode-on
+  (is (= :infisical (config/credential-source nil true))))
+
+(deftest credential-source-missing-when-env-absent-and-mode-off
+  (is (= :missing (config/credential-source nil false))))
+
+;; ---------------------------------------------------------------------------
+;; resolve-db-credential! (infisical-secrets spec, Requirements 2.1-2.5)
+;; NEVER throws — DB persistence stays optional under Infisical mode too.
+;; ---------------------------------------------------------------------------
+
+(deftest resolve-db-credential-legacy-env-wins-without-calling-infisical
+  (testing "returns the env value directly, never calls infisical/fetch-secret!"
+    (let [fetch-called (atom false)]
+      (with-redefs [infisical/fetch-secret! (fn [_ _] (reset! fetch-called true) "should-not-be-used")]
+        (let [result (config/resolve-db-credential!
+                      {"PGCONNSTRING" "postgres://legacy"}
+                      {:project-id "proj-123"})]
+          (is (= "postgres://legacy" result))
+          (is (false? @fetch-called)))))))
+
+(deftest resolve-db-credential-fetches-from-infisical-when-env-absent
+  (testing "calls infisical/fetch-secret! with PGCONNSTRING when the legacy env var is absent"
+    (with-redefs [infisical/fetch-secret!
+                  (fn [infisical-config secret-name]
+                    (is (= "proj-123" (:project-id infisical-config)))
+                    (is (= "PGCONNSTRING" secret-name))
+                    "postgres://from-infisical")]
+      (let [result (config/resolve-db-credential! {} {:project-id "proj-123"})]
+        (is (= "postgres://from-infisical" result))))))
+
+(deftest resolve-db-credential-nil-when-absent-and-not-infisical-mode
+  (testing "returns nil without throwing when env absent and not in Infisical mode (unchanged legacy behavior)"
+    (is (nil? (config/resolve-db-credential! {} nil)))))
+
+(deftest resolve-db-credential-nil-when-infisical-fetch-fails
+  (testing "returns nil without throwing when the Infisical fetch itself fails, for any reason (Requirement 2.3/2.5)"
+    (with-redefs [infisical/fetch-secret!
+                  (fn [_ _] (throw (ex-info "Infisical secret fetch failed for PGCONNSTRING"
+                                            {:stage :secrets :secret-name "PGCONNSTRING"
+                                             :infisical-error :clj-infisical/secret-not-found})))]
+      (is (nil? (config/resolve-db-credential! {} {:project-id "proj-123"}))))))
+
+;; ---------------------------------------------------------------------------
+;; resolve-b2-credential! (infisical-secrets spec, Requirements 3.1-3.4)
+;; Always throws on failure — B2 access is required for the pipeline to work.
+;; ---------------------------------------------------------------------------
+
+(deftest resolve-b2-credential-legacy-env-wins-without-calling-infisical
+  (testing "returns {:mode :rclone-config-file}, never calls infisical/fetch-secret!"
+    (let [fetch-called (atom false)]
+      (with-redefs [infisical/fetch-secret! (fn [_ _] (reset! fetch-called true) "should-not-be-used")]
+        (let [result (config/resolve-b2-credential!
+                      {"RCLONE_CONFIG" "/etc/rclone.conf"}
+                      {:project-id "proj-123"})]
+          (is (= {:mode :rclone-config-file} result))
+          (is (false? @fetch-called)))))))
+
+(deftest resolve-b2-credential-fetches-both-secrets-from-infisical-when-env-absent
+  (testing "fetches B2_KEY_ID and B2_APPLICATION_KEY, returns {:mode :infisical :env {...}}"
+    (with-redefs [infisical/fetch-secret!
+                  (fn [_ secret-name]
+                    (case secret-name
+                      "B2_KEY_ID"          "my-key-id"
+                      "B2_APPLICATION_KEY" "my-app-key"))]
+      (let [result (config/resolve-b2-credential! {} {:project-id "proj-123"})]
+        (is (= :infisical (:mode result)))
+        (is (= {"RCLONE_CONFIG_B2_TYPE"    "b2"
+                "RCLONE_CONFIG_B2_ACCOUNT" "my-key-id"
+                "RCLONE_CONFIG_B2_KEY"     "my-app-key"}
+               (:env result)))))))
+
+(deftest resolve-b2-credential-throws-when-absent-and-not-infisical-mode
+  (testing "throws ex-info :stage :secrets when env absent and not in Infisical mode"
+    (try
+      (config/resolve-b2-credential! {} nil)
+      (is false "expected ex-info to be thrown")
+      (catch clojure.lang.ExceptionInfo e
+        (is (= :secrets (:stage (ex-data e))))))))
+
+(deftest resolve-b2-credential-throws-when-infisical-fetch-fails
+  (testing "throws (does not swallow) when the Infisical fetch itself fails, for any reason (Requirement 3.4)"
+    (with-redefs [infisical/fetch-secret!
+                  (fn [_ secret-name]
+                    (throw (ex-info (str "Infisical secret fetch failed for " secret-name)
+                                    {:stage :secrets :secret-name secret-name
+                                     :infisical-error :clj-infisical/secret-not-found})))]
+      (try
+        (config/resolve-b2-credential! {} {:project-id "proj-123"})
+        (is false "expected ex-info to be thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= :secrets (:stage (ex-data e)))))))))
+
+;; ---------------------------------------------------------------------------
 ;; resolve-secrets tests
 ;; ---------------------------------------------------------------------------
 
@@ -177,6 +330,80 @@
                       nil))]
       (let [result (config/resolve-secrets valid-config)]
         (is (nil? (get-in result [:secrets :pg-conn-string])))))))
+
+;; ---------------------------------------------------------------------------
+;; resolve-secrets: Infisical mode (infisical-secrets spec, Requirements 2, 3, 5)
+;; ---------------------------------------------------------------------------
+
+(def ^:private infisical-config
+  (assoc valid-config :secret-store :infisical :infisical {:project-id "proj-123"}))
+
+(deftest resolve-secrets-legacy-only-mode-unchanged-shape
+  (testing "when :secret-store is absent, :secrets shape is exactly as before this feature existed (Requirement 5.1, 5.2)"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" "RCLONE_CONFIG" "/etc/rclone.conf" nil))]
+      (let [result (config/resolve-secrets valid-config)]
+        (is (= #{:encryption-key :rclone-config :pg-conn-string} (set (keys (:secrets result)))))))))
+
+(deftest resolve-secrets-infisical-mode-attaches-pg-conn-string-and-b2-rclone-env
+  (testing "adds :pg-conn-string (via Infisical) and :b2-rclone-env when both legacy env vars are absent"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" nil))
+                  infisical/fetch-secret!
+                  (fn [_ secret-name]
+                    (case secret-name
+                      "PGCONNSTRING"       "postgres://from-infisical"
+                      "B2_KEY_ID"          "key-id"
+                      "B2_APPLICATION_KEY" "app-key"))]
+      (let [result (config/resolve-secrets infisical-config)]
+        (is (= "postgres://from-infisical" (get-in result [:secrets :pg-conn-string])))
+        (is (= {"RCLONE_CONFIG_B2_TYPE"    "b2"
+                "RCLONE_CONFIG_B2_ACCOUNT" "key-id"
+                "RCLONE_CONFIG_B2_KEY"     "app-key"}
+               (get-in result [:secrets :b2-rclone-env])))))))
+
+(deftest resolve-secrets-infisical-mode-legacy-rclone-config-still-wins
+  (testing "when RCLONE_CONFIG is present even in Infisical mode, :b2-rclone-env is {} (legacy file path used)"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" "RCLONE_CONFIG" "/etc/rclone.conf" nil))]
+      (let [result (config/resolve-secrets infisical-config)]
+        (is (= {} (get-in result [:secrets :b2-rclone-env])))
+        (is (= "/etc/rclone.conf" (get-in result [:secrets :rclone-config])))))))
+
+(deftest resolve-secrets-infisical-mode-pg-failure-does-not-abort
+  (testing "an Infisical PGCONNSTRING fetch failure does not abort — :pg-conn-string is simply nil (Requirement 2.3/2.5)"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" "RCLONE_CONFIG" "/etc/rclone.conf" nil))
+                  infisical/fetch-secret!
+                  (fn [_ _] (throw (ex-info "not found" {:type :clj-infisical/secret-not-found})))]
+      (let [result (config/resolve-secrets infisical-config)]
+        (is (nil? (get-in result [:secrets :pg-conn-string])))))))
+
+(deftest resolve-secrets-infisical-mode-b2-failure-aborts
+  (testing "an Infisical B2 fetch failure with no legacy fallback DOES abort (Requirement 3.4)"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" nil))
+                  infisical/fetch-secret!
+                  (fn [_ secret-name]
+                    (case secret-name
+                      "PGCONNSTRING" "postgres://from-infisical"
+                      (throw (ex-info (str "Infisical secret fetch failed for " secret-name)
+                                      {:stage :secrets :secret-name secret-name
+                                       :infisical-error :clj-infisical/secret-not-found}))))]
+      (try
+        (config/resolve-secrets infisical-config)
+        (is false "expected ex-info to be thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= :secrets (:stage (ex-data e)))))))))
+
+(deftest resolve-secrets-infisical-mode-still-requires-encryption-key
+  (testing "BACKUP_ENCRYPTION_KEY is still required in Infisical mode — untouched, out of scope (Requirement 5.1)"
+    (with-redefs [strategic-backup.config/getenv (constantly nil)]
+      (try
+        (config/resolve-secrets infisical-config)
+        (is false "expected ex-info to be thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= ["BACKUP_ENCRYPTION_KEY"] (:missing-secrets (ex-data e)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Property 6: Config EDN Round-Trip
@@ -260,3 +487,26 @@
                    (not (contains? missing-reported "PGCONNSTRING"))
                    ;; :missing-secrets must be a non-empty vector/seq
                    (seq missing-reported)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Property 1 (infisical-secrets spec): Credential Source Decision Table
+;; Property 2 (infisical-secrets spec): Legacy Precedence Is Absolute
+;; ---------------------------------------------------------------------------
+
+;; **Validates: Requirements 2.1, 2.2, 3.1, 3.2**
+(defspec credential-source-decision-table 100
+  (prop/for-all [env-present?    gen/boolean
+                 env-value       gen/string-alphanumeric
+                 infisical-mode? gen/boolean]
+    (let [env-value' (when env-present? env-value)
+          result     (config/credential-source env-value' infisical-mode?)]
+      (cond
+        env-present?                    (= :env result)
+        (and (not env-present?) infisical-mode?) (= :infisical result)
+        :else                           (= :missing result)))))
+
+;; **Validates: Requirement 2.1, 3.1 (Core Principle — legacy precedence is absolute)**
+(defspec credential-source-legacy-precedence-is-absolute 100
+  (prop/for-all [env-value       (gen/not-empty gen/string-alphanumeric)
+                 infisical-mode? gen/boolean]
+    (not= :infisical (config/credential-source env-value infisical-mode?))))

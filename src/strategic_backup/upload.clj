@@ -20,49 +20,63 @@
   "Action. Uploads `local-path` to `remote` via `rclone copy` — never
    `rclone sync`, so existing remote objects are never deleted or
    overwritten (Req 4.2).
+
+   `env` (infisical-secrets spec, Requirement 3.3) is merged into the
+   subprocess environment — e.g. the RCLONE_CONFIG_B2_* vars when B2
+   credentials came from Infisical. Omitting it (or passing {}) reproduces
+   today's behavior exactly: the subprocess just inherits the JVM's own
+   environment, and rclone falls back to its own RCLONE_CONFIG-file
+   resolution.
+
    Returns nil on success; throws ex-info with :stage :upload on failure."
-  [executor local-path remote]
-  (let [result (shell/run-cmd executor "rclone" ["copy" local-path remote] {})]
-    (when (not= 0 (:exit result))
-      (throw (ex-info "rclone copy failed"
-                      {:stage :upload
-                       :cmd   (:cmd result)
-                       :exit  (:exit result)
-                       :err   (:err result)})))
-    nil))
+  ([executor local-path remote] (rclone-copy! executor local-path remote {}))
+  ([executor local-path remote env]
+   (let [result (shell/run-cmd executor "rclone" ["copy" local-path remote] {:env env})]
+     (when (not= 0 (:exit result))
+       (throw (ex-info "rclone copy failed"
+                       {:stage :upload
+                        :cmd   (:cmd result)
+                        :exit  (:exit result)
+                        :err   (:err result)})))
+     nil)))
 
 (defn download-archive!
   "Action. Downloads `filename` from `remote` into `local-dir` via
-   `rclone copy`.
+   `rclone copy`. See `rclone-copy!` for `env` (Requirement 3.3).
    Returns nil on success; throws ex-info with :stage :download on failure."
-  [executor remote filename local-dir]
-  (let [source (str remote "/" filename)
-        result (shell/run-cmd executor "rclone" ["copy" source local-dir] {})]
-    (when (not= 0 (:exit result))
-      (throw (ex-info "rclone download failed"
-                      {:stage :download
-                       :cmd   (:cmd result)
-                       :exit  (:exit result)
-                       :err   (:err result)})))
-    nil))
+  ([executor remote filename local-dir] (download-archive! executor remote filename local-dir {}))
+  ([executor remote filename local-dir env]
+   (let [source (str remote "/" filename)
+         result (shell/run-cmd executor "rclone" ["copy" source local-dir] {:env env})]
+     (when (not= 0 (:exit result))
+       (throw (ex-info "rclone download failed"
+                       {:stage :download
+                        :cmd   (:cmd result)
+                        :exit  (:exit result)
+                        :err   (:err result)})))
+     nil)))
 
 (defn delete-remote!
-  "Action. Deletes `filename` from `remote` via `rclone delete`.
+  "Action. Deletes `filename` from `remote` via `rclone delete`. See
+   `rclone-copy!` for `env` (Requirement 3.3).
    Never throws — returns {:ok true} on success or {:ok false :error
    \"...\"} on failure, so retention enforcement can continue past
    individual failures (Req 5.5)."
-  [executor remote filename]
-  (let [target (str remote "/" filename)
-        result (shell/run-cmd executor "rclone" ["delete" target] {})]
-    (if (= 0 (:exit result))
-      {:ok true}
-      {:ok false :error (:err result)})))
+  ([executor remote filename] (delete-remote! executor remote filename {}))
+  ([executor remote filename env]
+   (let [target (str remote "/" filename)
+         result (shell/run-cmd executor "rclone" ["delete" target] {:env env})]
+     (if (= 0 (:exit result))
+       {:ok true}
+       {:ok false :error (:err result)}))))
 
 (defn list-remote
   "Action. Lists archive filenames present at `remote` via `rclone lsf`.
+   See `rclone-copy!` for `env` (Requirement 3.3).
    Returns an empty seq (rather than throwing) when the command fails."
-  [executor remote]
-  (let [result (shell/run-cmd executor "rclone" ["lsf" remote] {})]
-    (if (= 0 (:exit result))
-      (parse-lsf-output (:out result))
-      [])))
+  ([executor remote] (list-remote executor remote {}))
+  ([executor remote env]
+   (let [result (shell/run-cmd executor "rclone" ["lsf" remote] {:env env})]
+     (if (= 0 (:exit result))
+       (parse-lsf-output (:out result))
+       []))))

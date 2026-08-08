@@ -54,7 +54,11 @@
         compression    (:compression config)
         cipher         (:encryption-cipher config)
         snap-prefix    (:snapshot-prefix config)
-        pg-conn-string (get-in config [:secrets :pg-conn-string])]
+        pg-conn-string (get-in config [:secrets :pg-conn-string])
+        ;; infisical-secrets spec, Requirement 3.3 — {} unless B2 credentials
+        ;; were resolved via Infisical, in which case this carries the
+        ;; RCLONE_CONFIG_B2_* env vars for every rclone subprocess call below.
+        b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})]
 
     ;; Validate retention count before doing any work
     (when (or (nil? retention-count) (<= retention-count 0))
@@ -106,12 +110,12 @@
             (log/warn "Async DB persist failed:" (.getMessage e)))))
 
       ;; 9. Upload archive to B2 (manifest EDN is NOT uploaded)
-      (upload/rclone-copy! executor archive-path b2-remote)
+      (upload/rclone-copy! executor archive-path b2-remote b2-rclone-env)
 
       ;; 10. Apply retention policy
-      (let [remote-files (upload/list-remote executor b2-remote)
+      (let [remote-files (upload/list-remote executor b2-remote b2-rclone-env)
             sorted       (retention/sort-by-timestamp remote-files)
-            ret-result   (retention/enforce-retention! executor b2-remote sorted retention-count)]
+            ret-result   (retention/enforce-retention! executor b2-remote sorted retention-count b2-rclone-env)]
         (when (seq (:failed ret-result))
           (log/warn "Some retention deletions failed:" (:failed ret-result))))
 
