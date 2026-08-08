@@ -6,7 +6,6 @@
      restore-test    — run the automated restore verification test
        --skip-verify   forces Mode 3 (no checksum verification)"
   (:require [clojure.java.io :as io]
-            [clojure.string :as str]
             [strategic-backup.config :as config]
             [strategic-backup.db :as db]
             [strategic-backup.manifest :as manifest]
@@ -49,7 +48,7 @@
         staging-dir    (:staging-dir config)
         b2-bucket      (:b2-bucket config)
         b2-path-prefix (:b2-path-prefix config)
-        b2-remote      (str "b2:" b2-bucket "/" b2-path-prefix)
+        b2-remote      (upload/remote-target b2-bucket b2-path-prefix)
         retention-count (:retention-count config)
         local-retention (:local-manifest-retention config)
         compression    (:compression config)
@@ -71,18 +70,14 @@
           _             (snapshot/create-snapshot! executor snap-name)
 
           ;; 2. Compute per-file checksums from dataset mountpoint
-          ;; (mountpoint is inferred as /mnt/<dataset-slug> or just use dataset)
-          mountpoint    (str "/" (str/replace dataset "/" "/"))
+          mountpoint    (manifest/dataset-mountpoint dataset)
           file-checksums (manifest/compute-file-checksums executor mountpoint)
 
           ;; 3. Check ZFS encryption status
           zfs-enc?      (snapshot/zfs-encrypted? executor dataset)
 
           ;; 4. Build archive filename and run pipeline
-          ts-compact    (str/replace (str/replace
-                                      (subs now 0 19)
-                                      "T" "T")
-                                     ":" "")
+          ts-compact    (pipeline/compact-timestamp now)
           slug          (pipeline/dataset-slug dataset)
           archive-fname (pipeline/archive-filename slug ts-compact zfs-enc?)
           archive-path  (str staging-dir "/" archive-fname)
@@ -147,6 +142,16 @@
 ;; CLI entry point
 ;; ---------------------------------------------------------------------------
 
+(defn exit!
+  "Action. Thin wrapper around System/exit.
+
+   Exists solely as a mockable seam: on Java 21+ there is no SecurityManager
+   to intercept System/exit (JEP 411 removed it), so calling it for real
+   from a test would kill the whole `lein test` JVM mid-suite. Tests
+   with-redefs this var instead of calling System/exit directly."
+  [code]
+  (System/exit code))
+
 (defn -main
   "CLI dispatcher.
 
@@ -164,20 +169,20 @@
         (case subcommand
           "backup"
           (do (run-backup! cfg executor)
-              (System/exit 0))
+              (exit! 0))
 
           "restore-test"
           (do (run-restore-test-cmd! cfg executor (boolean skip-verify?))
-              (System/exit 0))
+              (exit! 0))
 
           (do (log/error "Unknown subcommand:" subcommand
                          "Valid subcommands: backup, restore-test")
-              (System/exit 1))))
+              (exit! 1))))
       (catch clojure.lang.ExceptionInfo e
         (log/error "Pipeline failed" {:stage   (:stage (ex-data e))
                                       :message (.getMessage e)
                                       :data    (ex-data e)})
-        (System/exit 1))
+        (exit! 1))
       (catch Exception e
         (log/error "Unexpected error:" (.getMessage e))
-        (System/exit 1)))))
+        (exit! 1)))))
