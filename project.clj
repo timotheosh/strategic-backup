@@ -13,6 +13,10 @@
                  [io.github.timotheosh/clj-infisical "0.1.0"]]
   :main ^:skip-aot strategic-backup.core
   :target-path "target/%s"
+  ;; Fixed filename (not <name>-<version>-standalone.jar) so cron entries
+  ;; and deploy scripts never need to change on a version bump, and don't
+  ;; need to glob/regex for the artifact.
+  :uberjar-name "strategic-backup.jar"
   :profiles {:uberjar {:aot :all
                        :jvm-opts ["-Dclojure.compiler.direct-linking=true"]}
              :dev {:dependencies [[org.clojure/test.check "1.1.1"]]}})
