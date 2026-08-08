@@ -51,6 +51,12 @@
 ;; Public API
 ;; ---------------------------------------------------------------------------
 
+(defn resolve-config-path
+  "Calculation. Picks the effective config file path: explicit `path` wins,
+   then `env-path` (the STRATEGIC_BACKUP_CONFIG value), then `default-path`."
+  [path env-path default-path]
+  (or path env-path default-path))
+
 (defn load-config
   "Load the EDN config map from `path`.
 
@@ -61,9 +67,10 @@
      :reason :file-not-found  — when the file does not exist
      :reason :parse-error     — when the file content is not valid EDN"
   [path]
-  (let [resolved-path (or path
-                          (System/getenv "STRATEGIC_BACKUP_CONFIG")
-                          "/etc/strategic-backup/config.edn")
+  (let [resolved-path (resolve-config-path
+                       path
+                       (getenv "STRATEGIC_BACKUP_CONFIG")
+                       "/etc/strategic-backup/config.edn")
         f             (io/file resolved-path)]
     (when-not (.exists f)
       (throw (ex-info (str "Config file not found: " resolved-path)
@@ -78,6 +85,12 @@
                          :cause-msg (.getMessage e)}
                         e))))))
 
+(defn missing-config-keys
+  "Calculation. Returns a vector of all keys from `required-config-keys`
+   that are absent from `config`."
+  [config]
+  (filterv #(not (contains? config %)) required-config-keys))
+
 (defn validate-config
   "Validate that `config` contains all required keys.
 
@@ -86,12 +99,34 @@
    Throws ex-info with :missing-keys containing a vector of ALL absent
    required keys (not just the first one encountered)."
   [config]
-  (let [missing (filterv #(not (contains? config %)) required-config-keys)]
+  (let [missing (missing-config-keys config)]
     (when (seq missing)
       (log/error "Config validation failed. Missing keys:" missing)
       (throw (ex-info "Config is missing required keys"
                       {:missing-keys missing}))))
   config)
+
+(defn read-secret-env-vars
+  "Reads every required and optional secret env var (via `getenv`) into a
+   plain map of env-var-name -> value-or-nil. The only thing in this
+   namespace that touches `getenv` for secrets."
+  []
+  (into {} (map (fn [k] [k (getenv k)])
+                (concat required-secret-env-vars optional-secret-env-vars))))
+
+(defn missing-required-secrets
+  "Calculation. Returns a vector of required secret names whose value in
+   `env-map` is nil."
+  [env-map]
+  (filterv #(nil? (get env-map %)) required-secret-env-vars))
+
+(defn build-secrets-map
+  "Calculation. Shapes the raw env-var map into the :secrets map attached
+   to config: {:encryption-key ... :rclone-config ... :pg-conn-string ...}."
+  [env-map]
+  {:encryption-key (get env-map "BACKUP_ENCRYPTION_KEY")
+   :rclone-config  (get env-map "RCLONE_CONFIG")
+   :pg-conn-string (get env-map "PGCONNSTRING")})
 
 (defn resolve-secrets
   "Read required secrets from environment variables and attach them to config.
@@ -108,15 +143,12 @@
    names when any required secret is absent. Secret values are NEVER included
    in any log output or exception message."
   [config]
-  (let [missing-required (filterv #(nil? (getenv %)) required-secret-env-vars)]
-    (when (seq missing-required)
-      (log/error "Missing required secrets (env vars):" missing-required)
+  (let [env-map (read-secret-env-vars)
+        missing (missing-required-secrets env-map)]
+    (when (seq missing)
+      (log/error "Missing required secrets (env vars):" missing)
       (throw (ex-info "Missing required secrets"
-                      {:missing-secrets missing-required}))))
-  (let [pg-conn-string (getenv "PGCONNSTRING")]
-    (when (nil? pg-conn-string)
+                      {:missing-secrets missing})))
+    (when (nil? (get env-map "PGCONNSTRING"))
       (log/warn "PGCONNSTRING not set — PostgreSQL persistence will be skipped"))
-    (assoc config :secrets
-           {:encryption-key  (getenv "BACKUP_ENCRYPTION_KEY")
-            :rclone-config   (getenv "RCLONE_CONFIG")
-            :pg-conn-string  pg-conn-string})))
+    (assoc config :secrets (build-secrets-map env-map))))

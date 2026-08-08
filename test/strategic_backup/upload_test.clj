@@ -13,6 +13,14 @@
   (shell/make-mock-executor {} {:exit 1 :out "" :err "connection refused" :cmd ""}))
 
 ;; ---------------------------------------------------------------------------
+;; remote-target
+;; ---------------------------------------------------------------------------
+
+(deftest remote-target-builds-b2-spec
+  (testing "combines bucket and prefix into a b2: remote spec"
+    (is (= "b2:mybucket/zfs-backups/" (upload/remote-target "mybucket" "zfs-backups/")))))
+
+;; ---------------------------------------------------------------------------
 ;; rclone-copy!
 ;; ---------------------------------------------------------------------------
 
@@ -56,6 +64,16 @@
 (deftest rclone-copy-succeeds-on-exit-zero
   (testing "does not throw on exit 0"
     (is (nil? (upload/rclone-copy! (ok-executor) "/staging/archive.enc" "b2:bucket")))))
+
+;; ---------------------------------------------------------------------------
+;; parse-lsf-output (pure calculation extracted from list-remote)
+;; ---------------------------------------------------------------------------
+
+(deftest parse-lsf-output-splits-and-drops-blanks
+  (testing "splits on newlines and drops blank lines"
+    (is (= ["a.zfs.gz" "b.zfs.gz"] (upload/parse-lsf-output "a.zfs.gz\n\nb.zfs.gz\n"))))
+  (testing "empty output yields empty seq"
+    (is (= [] (upload/parse-lsf-output "")))))
 
 ;; ---------------------------------------------------------------------------
 ;; list-remote

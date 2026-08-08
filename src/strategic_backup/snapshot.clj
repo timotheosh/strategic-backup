@@ -25,11 +25,16 @@
                        :err   (:err result)})))
     snap-name))
 
+(defn encrypted-value?
+  "Calculation. Returns true unless the trimmed `zfs get encryption` output is \"off\"."
+  [output]
+  (not= "off" (str/trim output)))
+
 (defn zfs-encrypted?
   "Runs `zfs get -H -o value encryption <dataset>` and returns true unless the value is \"off\"."
   [executor dataset]
   (let [result (shell/run-cmd executor "zfs" ["get" "-H" "-o" "value" "encryption" dataset] {})]
-    (not= "off" (str/trim (:out result)))))
+    (encrypted-value? (:out result))))
 
 (defn receive-stream!
   "Runs `zfs receive <test-dataset>` via the executor.

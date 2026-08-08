@@ -81,6 +81,20 @@
       (is (= snap (snapshot/create-snapshot! (ok-executor) snap))))))
 
 ;; ---------------------------------------------------------------------------
+;; encrypted-value? (pure calculation extracted from zfs-encrypted?)
+;; ---------------------------------------------------------------------------
+
+(deftest encrypted-value-false-for-off
+  (testing "\"off\" (with or without trailing newline) is not encrypted"
+    (is (false? (snapshot/encrypted-value? "off")))
+    (is (false? (snapshot/encrypted-value? "off\n")))))
+
+(deftest encrypted-value-true-for-any-other-value
+  (testing "any non-off value is encrypted"
+    (is (true? (snapshot/encrypted-value? "aes-256-gcm")))
+    (is (true? (snapshot/encrypted-value? "on\n")))))
+
+;; ---------------------------------------------------------------------------
 ;; zfs-encrypted? (uses executor)
 ;; ---------------------------------------------------------------------------
 

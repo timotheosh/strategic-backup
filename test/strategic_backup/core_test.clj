@@ -218,45 +218,23 @@
         (with-redefs [strategic-backup.config/load-config     (fn [_] config)
                       strategic-backup.config/validate-config (fn [c] c)
                       strategic-backup.config/resolve-secrets (fn [c] c)
-                      core/run-backup!                        (fn [_ _] nil)]
-          ;; Patch pipeline stages so the full pipeline runs cleanly
-          (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
-                        strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                        strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
-                        strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
-                        strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
-                        strategic-backup.manifest/write-edn!              (fn [m _]
-                                                                            (str (.getAbsolutePath staging) "/" (:archive-file m)))
-                        strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
-                        strategic-backup.upload/rclone-copy!              (fn [_ _ _] nil)
-                        strategic-backup.upload/list-remote               (fn [_ _] [])
-                        strategic-backup.retention/enforce-retention!     (fn [_ _ _ _] {:deleted [] :failed []})
-                        strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)
-                        strategic-backup.config/load-config               (fn [_] config)
-                        strategic-backup.config/validate-config           (fn [c] c)
-                        strategic-backup.config/resolve-secrets           (fn [c] c)]
-            (try
-              (core/-main "backup")
-              (catch Exception _))))
-        ;; If System/exit isn't mockable directly, just verify no exception was thrown
-        (is true "backup completed without throwing")
+                      core/run-backup!                        (fn [_ _] nil)
+                      core/exit!                              (fn [code] (reset! exit-code code))]
+          (core/-main "backup"))
+        (is (= 0 @exit-code))
         (finally (delete-dir staging))))))
 
 (deftest main-exits-one-on-pipeline-failure
   (testing "-main exits with code 1 when any pipeline stage throws ex-info"
-    (let [staging (make-temp-dir)]
+    (let [exit-code (atom nil)
+          staging   (make-temp-dir)]
       (try
         (with-redefs [strategic-backup.config/load-config     (fn [_] (assoc base-config :staging-dir (.getAbsolutePath staging)))
                       strategic-backup.config/validate-config (fn [c] c)
                       strategic-backup.config/resolve-secrets (fn [c] c)
                       strategic-backup.snapshot/create-snapshot!
-                      (fn [_ _] (throw (ex-info "snapshot failed" {:stage :snapshot})))]
-          (try
-            (core/-main "backup")
-            (catch SecurityException e
-              ;; System/exit throws SecurityException in test JVMs sometimes
-              (is (str/includes? (.getMessage e) "1")))
-            (catch Exception _
-              ;; The exception from -main's catch block is acceptable
-              (is true "exception handling worked"))))
+                      (fn [_ _] (throw (ex-info "snapshot failed" {:stage :snapshot})))
+                      core/exit! (fn [code] (reset! exit-code code))]
+          (core/-main "backup"))
+        (is (= 1 @exit-code))
         (finally (delete-dir staging))))))
