@@ -88,6 +88,25 @@
                  true     (conj (str "zfs receive " test-dataset)))]
     (str/join " | " stages)))
 
+(defn ensure-encryption-key-present!
+  "Action. Throws ex-info {:stage :config} when openssl encryption or
+   decryption is about to run (`needs-key?` — i.e. the dataset is not
+   ZFS-encrypted) but `encryption-key` (BACKUP_ENCRYPTION_KEY) is nil.
+
+   A no-op whenever `needs-key?` is false — including whenever the
+   dataset is ZFS-encrypted, since build-pipeline-cmd/
+   build-restore-pipeline-cmd skip the openssl stage entirely in that
+   case, and this key is never touched. Shared by core.clj's backup path
+   and restore.clj's restore path, which differ only in which boolean
+   they've already computed (`(not zfs-encrypted?)` vs `decrypt?`)."
+  [needs-key? encryption-key]
+  (when (and needs-key? (nil? encryption-key))
+    (throw (ex-info (str "BACKUP_ENCRYPTION_KEY is not configured, but openssl"
+                         " encryption is required for this operation (the"
+                         " dataset is not ZFS-encrypted)")
+                    {:stage :config})))
+  nil)
+
 (defn extract-output-path
   "Calculation. Extracts the redirected output file path (the token after
    the final `>`) from a pipeline command string, or nil if none is found."

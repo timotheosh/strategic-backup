@@ -71,15 +71,21 @@ from environment variables:
 
 | Variable                     | Required? | Purpose                                              |
 |-------------------------------+-----------+-------------------------------------------------------|
-| ~BACKUP_ENCRYPTION_KEY~       | Yes       | ~openssl enc~ passphrase (via ~-pass env:~, never argv) |
-| ~RCLONE_CONFIG~               | Yes\*     | Path to an rclone config file with a B2 remote        |
+| ~BACKUP_ENCRYPTION_KEY~       | No\*      | ~openssl enc~ passphrase (via ~-pass env:~, never argv) |
+| ~RCLONE_CONFIG~               | Yes\*\*   | Path to an rclone config file with a B2 remote        |
 | ~PGCONNSTRING~                | No        | Postgres/CockroachDB connection string (JDBC-style)   |
-| ~ZFS_ENCRYPTION_PASSPHRASE~   | No\*\*    | Passphrase to ~zfs load-key~ a ZFS-encrypted ~:test-dataset~ during ~restore-test~ |
+| ~ZFS_ENCRYPTION_PASSPHRASE~   | No\*      | Passphrase to ~zfs load-key~ a ZFS-encrypted ~:test-dataset~ during ~restore-test~ |
 
-\* Not required if using Infisical mode for B2 credentials — see below.
+\* ~BACKUP_ENCRYPTION_KEY~ and ~ZFS_ENCRYPTION_PASSPHRASE~ are mirror images of
+each other, and between the two of them exactly one is actually needed for
+any given dataset (see the table in [[#zfs-encryption-passphrase][ZFS encryption passphrase]] below).
+Neither is checked at startup — whichever one a given run turns out to need
+is checked right before it's used, so a run never aborts over a secret it
+was never going to touch. Getting it wrong (needed but missing/wrong) still
+aborts loudly, just later: mid-~backup~ before anything is uploaded, or
+mid-~restore-test~ before cleanup runs (cleanup itself always still happens).
 
-\*\* Only needed if ~:dataset~ is itself ZFS-encrypted (~encryption~ property
-not ~off~) — see [[#zfs-encryption-passphrase][ZFS encryption passphrase]] below.
+\*\* Not required if using Infisical mode for B2 credentials — see below.
 
 **** PGCONNSTRING format
 :PROPERTIES:
@@ -119,6 +125,26 @@ dataset before it can read files back off it to verify their checksums.
 If the source dataset's ~keylocation~ is ~prompt~ (the normal case for an
 interactively-entered passphrase), there's nothing to prompt in an
 unattended cron job — that's what this secret is for.
+
+~BACKUP_ENCRYPTION_KEY~ and ~ZFS_ENCRYPTION_PASSPHRASE~ are two sides of the
+same coin — for any one dataset, exactly one of them actually does
+anything:
+
+| ~:dataset~ encryption | Backup archive protected by | Secret ~restore-test~ needs |
+|-------------------------+-------------------------------+--------------------------------|
+| ZFS-encrypted           | ZFS itself (native)          | ~ZFS_ENCRYPTION_PASSPHRASE~    |
+| Not ZFS-encrypted       | ~openssl~ via ~BACKUP_ENCRYPTION_KEY~ | none (nothing to unlock) |
+
+Neither secret is required at startup, since which one (if either) is
+actually needed depends on ~:dataset~'s live encryption status, which isn't
+known until the pipeline runs. Each is instead checked right at the point
+it would be used, and aborts loudly if missing rather than failing with a
+confusing shell error or silently skipping a step: ~backup~ checks before
+touching the network if it's about to ~openssl~-encrypt; ~restore-test~
+checks before ~zfs receive~ if it's about to ~openssl~-decrypt, or after
+~zfs receive~ but before verification if it's about to unlock a ZFS key.
+Either way, ~restore-test~'s usual cleanup (destroying the test dataset,
+deleting the downloaded archive) still runs regardless.
 
 Set ~ZFS_ENCRYPTION_PASSPHRASE~ (env var or Infisical, same precedence as
 every other secret here) to the passphrase for ~:dataset~. It's piped to

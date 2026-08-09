@@ -121,6 +121,7 @@
         ;; infisical-secrets spec, Requirement 3.3 — see core.clj's run-backup!
         b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})
         zfs-passphrase (get-in config [:secrets :zfs-encryption-passphrase])
+        encryption-key (get-in config [:secrets :encryption-key])
 
         pg-manifest    (db/fetch-latest-manifest pg-conn-string dataset)
         local-manifest (manifest/latest-local-edn staging-dir)
@@ -160,6 +161,12 @@
                                 {:stage    :verify
                                  :expected (:stream-checksum manifest)
                                  :actual   actual})))))
+
+          ;; BACKUP_ENCRYPTION_KEY is only actually required when the
+          ;; archive needs openssl decryption — checked here, now that
+          ;; decrypt? is known, rather than unconditionally at
+          ;; config-resolution time (mirrors core.clj's backup-side check).
+          (pipeline/ensure-encryption-key-present! decrypt? encryption-key)
 
           ;; Req 7.7-7.12 — decrypt (if needed), decompress, zfs receive
           (run-restore-pipeline!

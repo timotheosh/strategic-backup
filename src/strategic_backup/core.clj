@@ -88,7 +88,8 @@
         ;; infisical-secrets spec, Requirement 3.3 — {} unless B2 credentials
         ;; were resolved via Infisical, in which case this carries the
         ;; RCLONE_CONFIG_B2_* env vars for every rclone subprocess call below.
-        b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})]
+        b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})
+        encryption-key (get-in config [:secrets :encryption-key])]
 
     ;; Validate retention count before doing any work
     (when (or (nil? retention-count) (<= retention-count 0))
@@ -109,6 +110,12 @@
 
           ;; 3. Check ZFS encryption status
           zfs-enc?      (snapshot/zfs-encrypted? executor dataset)
+
+          ;; BACKUP_ENCRYPTION_KEY is only actually required when the
+          ;; dataset isn't ZFS-encrypted (openssl encryption is the
+          ;; fallback in that case) — checked here, now that zfs-enc? is
+          ;; known, rather than unconditionally at config-resolution time.
+          _             (pipeline/ensure-encryption-key-present! (not zfs-enc?) encryption-key)
 
           ;; 4. Build archive filename and run pipeline
           ts-compact    (pipeline/compact-timestamp now)

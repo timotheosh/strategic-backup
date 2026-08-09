@@ -257,6 +257,56 @@
         (is (every? #(= b2-env %) @captured-envs))
         (finally (delete-dir staging))))))
 
+;; ---------------------------------------------------------------------------
+;; BACKUP_ENCRYPTION_KEY — only required when the dataset is not ZFS-encrypted
+;; (openssl encryption is the fallback in that case; a ZFS-encrypted dataset
+;; never touches this key at all, see pipeline/ensure-encryption-key-present!)
+;; ---------------------------------------------------------------------------
+
+(deftest backup-throws-before-pipeline-when-not-zfs-encrypted-and-no-key
+  (testing "aborts with :stage :config, before ever running the pipeline, when
+            the dataset is not ZFS-encrypted and no BACKUP_ENCRYPTION_KEY is configured"
+    (let [pipeline-called (atom false)
+          staging         (make-temp-dir)
+          config          (-> base-config
+                              (assoc :staging-dir (.getAbsolutePath staging))
+                              (assoc-in [:secrets :encryption-key] nil))]
+      (try
+        (with-redefs [strategic-backup.snapshot/create-snapshot!      (fn [_ _] nil)
+                      strategic-backup.snapshot/zfs-encrypted?         (fn [_ _] false)
+                      strategic-backup.manifest/compute-file-checksums (fn [_ _] {})
+                      strategic-backup.pipeline/run-pipeline!          (fn [_ _] (reset! pipeline-called true) nil)]
+          (try
+            (core/run-backup! config (ok-executor))
+            (is false "expected ex-info to be thrown")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :config (:stage (ex-data e)))))))
+        (is (false? @pipeline-called))
+        (finally (delete-dir staging))))))
+
+(deftest backup-succeeds-with-no-key-when-dataset-is-zfs-encrypted
+  (testing "runs successfully with no BACKUP_ENCRYPTION_KEY configured when the
+            dataset IS ZFS-encrypted — the key is never needed in that case"
+    (let [staging (make-temp-dir)
+          config  (-> base-config
+                      (assoc :staging-dir (.getAbsolutePath staging))
+                      (assoc-in [:secrets :encryption-key] nil))]
+      (try
+        (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
+                      strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] true)
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
+                      strategic-backup.manifest/write-edn!              (fn [m _]
+                                                                          (str (.getAbsolutePath staging) "/" (:archive-file m)))
+                      strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
+                      strategic-backup.upload/rclone-copy!              (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
+          (is (nil? (core/run-backup! config (ok-executor)))))
+        (finally (delete-dir staging))))))
+
 (deftest backup-does-not-hang-waiting-for-a-slow-db-persist
   (testing "run-backup! returns promptly even when DB persist would take far longer than the await timeout"
     (let [staging (make-temp-dir)
