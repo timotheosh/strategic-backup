@@ -124,6 +124,10 @@
         rclone-config  (get-in config [:secrets :rclone-config])
         zfs-passphrase (get-in config [:secrets :zfs-encryption-passphrase])
         encryption-key (get-in config [:secrets :encryption-key])
+        ;; pipeline-timing spec, Req 4.3/4.4 — not a secret, an ordinary
+        ;; optional config value; falls back to manifest's single source
+        ;; of truth for the default rather than duplicating the literal.
+        checksum-concurrency (get config :checksum-concurrency manifest/default-checksum-concurrency)
 
         ;; B2 access is required for restore-test to function at all —
         ;; checked here, before any real work (including fetching a
@@ -198,7 +202,7 @@
             (timing/time-stage! :file-checksum-verify
              (fn []
                (let [test-mountpoint (manifest/dataset-mountpoint test-dataset)
-                     result          (verify/verify-file-checksums! test-mountpoint manifest)]
+                     result          (verify/verify-file-checksums! test-mountpoint manifest checksum-concurrency)]
                  (when-not (:ok result)
                    (throw (ex-info "Restore file checksum verification failed"
                                    {:stage      :verify

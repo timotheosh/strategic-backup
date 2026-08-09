@@ -76,7 +76,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
                       strategic-backup.manifest/write-edn!              (fn [m _]
@@ -104,7 +104,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
                       strategic-backup.manifest/write-edn!              (fn [m _]
@@ -129,7 +129,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
                       strategic-backup.manifest/write-edn!              (fn [m _]
@@ -157,7 +157,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!
                       (fn [_ cmd]
                         ;; Create the archive file so delete has something to remove
@@ -188,7 +188,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
                       strategic-backup.manifest/write-edn!
@@ -239,7 +239,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
                       strategic-backup.manifest/write-edn!              (fn [m _]
@@ -274,7 +274,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!      (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?         (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!          (fn [_ _] (reset! pipeline-called true) nil)]
           (try
             (core/run-backup! config (ok-executor) false)
@@ -294,7 +294,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] true)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
                       strategic-backup.manifest/write-edn!              (fn [m _]
@@ -323,7 +323,7 @@
                       (fn [stage thunk] (swap! stages conj stage) (thunk))
                       strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
                       strategic-backup.manifest/write-edn!              (fn [m _]
@@ -371,7 +371,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
-                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ _] {})
                       strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
                       strategic-backup.manifest/write-edn!              (fn [m _]
@@ -424,7 +424,7 @@
 
 (deftest run-checksums-returns-ok-true-with-file-count
   (with-redefs [strategic-backup.manifest/compute-file-checksums
-                (fn [_ _] {"./a.txt" "sha256:aaa" "./b.txt" "sha256:bbb"})]
+                (fn [_ _ _] {"./a.txt" "sha256:aaa" "./b.txt" "sha256:bbb"})]
     (let [result (core/run-checksums! base-config false)]
       (is (true? (:ok result)))
       (is (= 2 (:file-count result)))
@@ -432,19 +432,38 @@
 
 (deftest run-checksums-returns-ok-false-on-failure
   (with-redefs [strategic-backup.manifest/compute-file-checksums
-                (fn [_ _] (throw (Exception. "boom")))]
+                (fn [_ _ _] (throw (Exception. "boom")))]
     (is (= {:ok false :error "boom"} (core/run-checksums! base-config false)))))
 
 (deftest run-checksums-strict-failure-returns-ok-false-not-throw
   (testing "a --strict-checksums hash failure is caught here and reported as
             :ok false, same as any other failure mode for this diagnostic command"
     (with-redefs [strategic-backup.manifest/compute-file-checksums
-                  (fn [_ strict?]
+                  (fn [_ strict? _concurrency]
                     (if strict?
                       (throw (ex-info "Failed to checksum file" {:stage :checksum}))
                       {}))]
       (let [result (core/run-checksums! base-config true)]
         (is (false? (:ok result)))))))
+
+(deftest run-checksums-passes-configured-checksum-concurrency
+  (testing "an explicit :checksum-concurrency in config is threaded to
+            manifest/compute-file-checksums"
+    (let [captured (atom nil)
+          config   (assoc base-config :checksum-concurrency 8)]
+      (with-redefs [strategic-backup.manifest/compute-file-checksums
+                    (fn [_ _ concurrency] (reset! captured concurrency) {})]
+        (core/run-checksums! config false)
+        (is (= 8 @captured))))))
+
+(deftest run-checksums-defaults-checksum-concurrency-when-absent
+  (testing "falls back to manifest/default-checksum-concurrency when :checksum-concurrency
+            is absent from config"
+    (let [captured (atom nil)]
+      (with-redefs [strategic-backup.manifest/compute-file-checksums
+                    (fn [_ _ concurrency] (reset! captured concurrency) {})]
+        (core/run-checksums! base-config false)
+        (is (= strategic-backup.manifest/default-checksum-concurrency @captured))))))
 
 (deftest run-checksums-does-not-touch-secrets-or-b2
   (testing "requires only :dataset — never calls ensure-b2-credentials-present! or
@@ -452,7 +471,7 @@
             secrets configured at all"
     (let [b2-check-called (atom false)
           config-no-secrets (dissoc base-config :secrets)]
-      (with-redefs [strategic-backup.manifest/compute-file-checksums (fn [_ _] {})
+      (with-redefs [strategic-backup.manifest/compute-file-checksums (fn [_ _ _] {})
                     strategic-backup.upload/ensure-b2-credentials-present!
                     (fn [_ _] (reset! b2-check-called true))]
         (let [result (core/run-checksums! config-no-secrets false)]
@@ -473,7 +492,7 @@
         (with-redefs [strategic-backup.snapshot/create-snapshot!      (fn [_ _] nil)
                       strategic-backup.snapshot/zfs-encrypted?         (fn [_ _] false)
                       strategic-backup.manifest/compute-file-checksums
-                      (fn [_ _] (throw (ex-info "Failed to checksum file" {:stage :checksum})))
+                      (fn [_ _ _] (throw (ex-info "Failed to checksum file" {:stage :checksum})))
                       strategic-backup.upload/rclone-copy!             (fn [_ _ _ _] (reset! upload-called true))]
           (try
             (core/run-backup! config (ok-executor) true)
@@ -481,6 +500,54 @@
             (catch clojure.lang.ExceptionInfo e
               (is (= :checksum (:stage (ex-data e)))))))
         (is (false? @upload-called))
+        (finally (delete-dir staging))))))
+
+(deftest backup-passes-configured-checksum-concurrency
+  (testing "an explicit :checksum-concurrency in config is threaded to
+            manifest/compute-file-checksums"
+    (let [captured (atom nil)
+          staging  (make-temp-dir)
+          config   (-> base-config
+                       (assoc :staging-dir (.getAbsolutePath staging))
+                       (assoc :checksum-concurrency 8))]
+      (try
+        (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
+                      strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ concurrency] (reset! captured concurrency) {})
+                      strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
+                      strategic-backup.manifest/write-edn!              (fn [m _]
+                                                                          (str (.getAbsolutePath staging) "/" (:archive-file m)))
+                      strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
+                      strategic-backup.upload/rclone-copy!              (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
+          (core/run-backup! config (ok-executor) false))
+        (is (= 8 @captured))
+        (finally (delete-dir staging))))))
+
+(deftest backup-defaults-checksum-concurrency-when-absent
+  (testing "falls back to manifest/default-checksum-concurrency when :checksum-concurrency
+            is absent from config"
+    (let [captured (atom nil)
+          staging  (make-temp-dir)
+          config   (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
+                      strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _ concurrency] (reset! captured concurrency) {})
+                      strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
+                      strategic-backup.manifest/write-edn!              (fn [m _]
+                                                                          (str (.getAbsolutePath staging) "/" (:archive-file m)))
+                      strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
+                      strategic-backup.upload/rclone-copy!              (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
+          (core/run-backup! config (ok-executor) false))
+        (is (= strategic-backup.manifest/default-checksum-concurrency @captured))
         (finally (delete-dir staging))))))
 
 ;; ---------------------------------------------------------------------------
@@ -626,7 +693,7 @@
         (with-redefs [strategic-backup.config/load-config     (fn [_] config)
                       strategic-backup.config/validate-config (fn [c] c)
                       strategic-backup.config/resolve-secrets (fn [c] c)
-                      strategic-backup.manifest/compute-file-checksums (fn [_ _] {})
+                      strategic-backup.manifest/compute-file-checksums (fn [_ _ _] {})
                       core/exit!                              (fn [code] (reset! exit-code code))]
           (core/-main "--checksums"))
         (is (= 0 @exit-code))
@@ -641,7 +708,7 @@
         (with-redefs [strategic-backup.config/load-config     (fn [_] config)
                       strategic-backup.config/validate-config (fn [c] c)
                       strategic-backup.config/resolve-secrets (fn [c] c)
-                      strategic-backup.manifest/compute-file-checksums (fn [_ _] (throw (Exception. "boom")))
+                      strategic-backup.manifest/compute-file-checksums (fn [_ _ _] (throw (Exception. "boom")))
                       core/exit!                              (fn [code] (reset! exit-code code))]
           (core/-main "--checksums"))
         (is (= 1 @exit-code))

@@ -101,7 +101,11 @@
         ;; RCLONE_CONFIG_B2_* env vars for every rclone subprocess call below.
         b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})
         rclone-config  (get-in config [:secrets :rclone-config])
-        encryption-key (get-in config [:secrets :encryption-key])]
+        encryption-key (get-in config [:secrets :encryption-key])
+        ;; pipeline-timing spec, Req 4.3/4.4 — not a secret, an ordinary
+        ;; optional config value; falls back to manifest's single source
+        ;; of truth for the default rather than duplicating the literal.
+        checksum-concurrency (get config :checksum-concurrency manifest/default-checksum-concurrency)]
 
     ;; Validate retention count before doing any work
     (when (or (nil? retention-count) (<= retention-count 0))
@@ -125,7 +129,7 @@
           ;; 2. Compute per-file checksums from dataset mountpoint
           mountpoint    (manifest/dataset-mountpoint dataset)
           file-checksums (timing/time-stage! :file-checksums
-                          #(manifest/compute-file-checksums mountpoint strict-checksums?))
+                          #(manifest/compute-file-checksums mountpoint strict-checksums? checksum-concurrency))
 
           ;; 3. Check ZFS encryption status
           zfs-enc?      (snapshot/zfs-encrypted? executor dataset)
@@ -269,11 +273,15 @@
    diagnostic command (mirrors run-db-test!/run-b2-test!'s contract)."
   [config strict?]
   (let [dataset    (:dataset config)
-        mountpoint (manifest/dataset-mountpoint dataset)]
+        mountpoint (manifest/dataset-mountpoint dataset)
+        ;; pipeline-timing spec, Req 4.3/4.4 — not a secret, an ordinary
+        ;; optional config value; falls back to manifest's single source
+        ;; of truth for the default rather than duplicating the literal.
+        checksum-concurrency (get config :checksum-concurrency manifest/default-checksum-concurrency)]
     (try
       (let [{:keys [result elapsed-ms]}
             (timing/time-stage-with-result! :checksums-diagnostic
-             #(manifest/compute-file-checksums mountpoint strict?))
+             #(manifest/compute-file-checksums mountpoint strict? checksum-concurrency))
             file-count (count result)]
         (log/info "checksum-only run complete"
                   {:dataset       dataset

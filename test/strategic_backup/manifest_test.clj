@@ -146,7 +146,7 @@
       (spit (io/file dir "a.txt") "hello")
       (.mkdirs (io/file dir "sub"))
       (spit (io/file dir "sub" "b.txt") "world")
-      (let [result (manifest/compute-file-checksums (.getAbsolutePath dir) false)]
+      (let [result (manifest/compute-file-checksums (.getAbsolutePath dir) false 1)]
         (is (= 2 (count result)))
         (is (= "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
                (get result "./a.txt")))
@@ -157,7 +157,7 @@
 (deftest compute-file-checksums-empty-dir-returns-empty-map
   (let [dir (make-temp-dir)]
     (try
-      (is (= {} (manifest/compute-file-checksums (.getAbsolutePath dir) false)))
+      (is (= {} (manifest/compute-file-checksums (.getAbsolutePath dir) false 1)))
       (finally (delete-dir dir)))))
 
 (deftest compute-file-checksums-non-strict-excludes-failed-file-not-nil
@@ -174,7 +174,7 @@
                         (if (= "bad.txt" (.getName ^java.io.File f))
                           (throw (java.io.IOException. "simulated failure"))
                           (real-hash-file f)))]
-          (let [result (manifest/compute-file-checksums (.getAbsolutePath dir) false)]
+          (let [result (manifest/compute-file-checksums (.getAbsolutePath dir) false 1)]
             (is (= 1 (count result)))
             (is (contains? result "./good.txt"))
             (is (not (contains? result "./bad.txt")))
@@ -194,8 +194,75 @@
                           (throw (java.io.IOException. "simulated failure"))
                           (real-hash-file f)))]
           (try
-            (manifest/compute-file-checksums (.getAbsolutePath dir) true)
+            (manifest/compute-file-checksums (.getAbsolutePath dir) true 1)
             (is false "expected ex-info to be thrown")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :checksum (:stage (ex-data e)))))))
+        (finally (delete-dir dir))))))
+
+;; ---------------------------------------------------------------------------
+;; compute-file-checksums — concurrency (pipeline-timing spec, Requirement 4)
+;; Property 4: Concurrency Never Changes The Result
+;; ---------------------------------------------------------------------------
+
+(deftest compute-file-checksums-same-result-at-concurrency-1-and-greater
+  (testing "identical result map regardless of concurrency, for a set of
+            successfully-hashed files"
+    (let [dir (make-temp-dir)]
+      (try
+        (doseq [n (range 10)]
+          (spit (io/file dir (str "f" n ".txt")) (str "content-" n)))
+        (let [path        (.getAbsolutePath dir)
+              sequential  (manifest/compute-file-checksums path false 1)
+              concurrent  (manifest/compute-file-checksums path false 4)
+              max-concur  (manifest/compute-file-checksums path false 100)]
+          (is (= 10 (count sequential)))
+          (is (= sequential concurrent))
+          (is (= sequential max-concur)))
+        (finally (delete-dir dir))))))
+
+(deftest compute-file-checksums-non-strict-excludes-failed-file-under-concurrency
+  (testing "the non-strict exclusion behavior (Property 1) holds identically when
+            concurrency > 1 — the failing file is still absent, not present-as-nil,
+            and every other file is still hashed correctly"
+    (let [dir            (make-temp-dir)
+          real-hash-file manifest/hash-file]
+      (try
+        (doseq [n (range 8)]
+          (spit (io/file dir (str "f" n ".txt")) (str "content-" n)))
+        (spit (io/file dir "bad.txt") "world")
+        (with-redefs [manifest/hash-file
+                      (fn [f]
+                        (if (= "bad.txt" (.getName ^java.io.File f))
+                          (throw (java.io.IOException. "simulated failure"))
+                          (real-hash-file f)))]
+          (let [result (manifest/compute-file-checksums (.getAbsolutePath dir) false 4)]
+            (is (= 8 (count result)))
+            (is (not (contains? result "./bad.txt")))
+            (is (not (contains? (set (vals result)) nil)))))
+        (finally (delete-dir dir))))))
+
+(deftest compute-file-checksums-strict-throws-plain-ex-info-under-concurrency
+  (testing "a strict-mode failure under concurrency > 1 still surfaces as a plain
+            ex-info :stage :checksum — never wrapped in
+            java.util.concurrent.ExecutionException — because deref on a Clojure
+            future unwraps a worker thread's exception to its original type"
+    (let [dir            (make-temp-dir)
+          real-hash-file manifest/hash-file]
+      (try
+        (doseq [n (range 8)]
+          (spit (io/file dir (str "f" n ".txt")) (str "content-" n)))
+        (spit (io/file dir "bad.txt") "world")
+        (with-redefs [manifest/hash-file
+                      (fn [f]
+                        (if (= "bad.txt" (.getName ^java.io.File f))
+                          (throw (java.io.IOException. "simulated failure"))
+                          (real-hash-file f)))]
+          (try
+            (manifest/compute-file-checksums (.getAbsolutePath dir) true 4)
+            (is false "expected ex-info to be thrown")
+            (catch java.util.concurrent.ExecutionException _e
+              (is false "exception leaked as ExecutionException — deref did not unwrap it"))
             (catch clojure.lang.ExceptionInfo e
               (is (= :checksum (:stage (ex-data e)))))))
         (finally (delete-dir dir))))))

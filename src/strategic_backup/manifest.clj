@@ -88,6 +88,56 @@
               (recur))))))
     (str "sha256:" (format-hex (.digest digest)))))
 
+(def default-checksum-concurrency
+  "Data. Default number of files hashed concurrently by
+   compute-file-checksums when :checksum-concurrency is absent from
+   config (pipeline-timing spec, Req 4.1/4.4) — the single source of
+   truth referenced by core.clj/restore.clj, rather than duplicating the
+   literal value in both places."
+  4)
+
+(defn- checksum-one-file
+  "Action (private). Hashes a single file, returning [relative-path
+   digest] on success. Extracted from compute-file-checksums so the same
+   per-file catch/exclude-or-propagate decision runs identically whether
+   invoked directly (concurrency 1) or inside a `future` (concurrency >
+   1) — the decision logic itself doesn't change based on how it's
+   invoked.
+
+   `strict?` false: a hash failure is logged via log/warn and this
+   returns nil (Req 1.2/1.3) — the caller is expected to filter nils out.
+   `strict?` true: a hash failure is wrapped in ex-info {:stage :checksum
+   :path abs-path} and thrown (Req 1.4)."
+  [mountpoint strict? ^java.io.File f]
+  (let [abs-path (.getAbsolutePath f)]
+    (try
+      [(relativize-path mountpoint abs-path) (hash-file f)]
+      (catch Exception e
+        (if strict?
+          (throw (ex-info "Failed to checksum file"
+                          {:stage :checksum :path abs-path}
+                          e))
+          (do
+            (log/warn "Failed to checksum file — excluded from manifest"
+                      {:path abs-path :error (.getMessage e)})
+            nil))))))
+
+(defn- deref-unwrapped
+  "Action (private). Derefs `fut`, unwrapping
+   java.util.concurrent.ExecutionException to its original cause.
+   Clojure's `deref` does NOT do this automatically — confirmed
+   empirically (a future that throws ex-info surfaces on deref as a raw
+   ExecutionException wrapping it) — so without this, a strict-mode
+   checksum-one-file failure would surface as ExecutionException instead
+   of the plain ex-info {:stage :checksum} callers expect, meaning
+   behavior would change based on concurrency alone (violates Req
+   4.2/4.5)."
+  [fut]
+  (try
+    (deref fut)
+    (catch java.util.concurrent.ExecutionException e
+      (throw (.getCause e)))))
+
 (defn compute-file-checksums
   "Action. Walks every regular file under `mountpoint` and computes its
    SHA-256 checksum in-process via hash-file — no subprocess spawn per
@@ -95,6 +145,18 @@
    `openssl dgst -sha256` once per file, which dominated wall-clock time
    on datasets with many small files). Returns a map of relative path
    (\"./...\") -> \"sha256:<hex>\".
+
+   Hashes up to `concurrency` files at once (Req 4.1) — files are
+   batched (`partition-all concurrency`), each batch's files hashed
+   concurrently via `clojure.core/future` (no new executor, no new
+   dependency; the JVM's existing agent thread pool backs Clojure's
+   futures), with the whole batch collected via deref-unwrapped before
+   the next one starts. deref-unwrapped restores a worker thread's
+   exception to its original type, so strict-mode failures below surface
+   identically regardless of concurrency (Req 4.5) — never as a raw
+   java.util.concurrent.ExecutionException. Concurrency only affects
+   wall-clock duration, never which files are included/excluded or which
+   failure aborts the run (Req 4.2).
 
    `strict?` false (default posture — see core.clj/restore.clj callers):
    a file that fails to hash is logged via log/warn and EXCLUDED from the
@@ -104,25 +166,16 @@
    `strict?` true: a hash failure is wrapped in ex-info {:stage :checksum
    :path abs-path} and propagates immediately, aborting the caller
    (Req 1.4) — enabled via the --strict-checksums CLI flag."
-  [mountpoint strict?]
+  [mountpoint strict? concurrency]
   (let [root  (io/file mountpoint)
         files (->> (file-seq root)
                    (filter #(.isFile ^java.io.File %)))]
     (into {}
-          (keep (fn [^java.io.File f]
-                  (let [abs-path (.getAbsolutePath f)]
-                    (try
-                      [(relativize-path mountpoint abs-path) (hash-file f)]
-                      (catch Exception e
-                        (if strict?
-                          (throw (ex-info "Failed to checksum file"
-                                          {:stage :checksum :path abs-path}
-                                          e))
-                          (do
-                            (log/warn "Failed to checksum file — excluded from manifest"
-                                      {:path abs-path :error (.getMessage e)})
-                            nil)))))))
-          files)))
+          (mapcat (fn [batch]
+                    (->> batch
+                         (mapv (fn [f] (future (checksum-one-file mountpoint strict? f))))
+                         (keep deref-unwrapped))))
+          (partition-all concurrency files))))
 
 (defn compute-stream-checksum
   "Action. Computes the SHA-256 checksum of the final archive file via

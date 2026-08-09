@@ -41,15 +41,15 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest compute-actual-checksums-delegates-to-manifest
-  (testing "delegates to manifest/compute-file-checksums (strict? hardcoded false)
-            rather than reimplementing"
+  (testing "delegates to manifest/compute-file-checksums (strict? hardcoded false),
+            threading concurrency through rather than reimplementing"
     (let [call-args (atom nil)]
       (with-redefs [strategic-backup.manifest/compute-file-checksums
-                    (fn [mountpoint strict?]
-                      (reset! call-args [mountpoint strict?])
+                    (fn [mountpoint strict? concurrency]
+                      (reset! call-args [mountpoint strict? concurrency])
                       {"./a.txt" "sha256:aaa"})]
-        (let [result (verify/compute-actual-checksums "/mnt/test")]
-          (is (= ["/mnt/test" false] @call-args))
+        (let [result (verify/compute-actual-checksums "/mnt/test" 4)]
+          (is (= ["/mnt/test" false 4] @call-args))
           (is (= {"./a.txt" "sha256:aaa"} result)))))))
 
 ;; ---------------------------------------------------------------------------
@@ -58,27 +58,30 @@
 
 (deftest verify-file-checksums-ok-when-all-match
   (with-redefs [strategic-backup.manifest/compute-file-checksums
-                (fn [_ _] {"./a.txt" "sha256:aaa"})]
+                (fn [_ _ _] {"./a.txt" "sha256:aaa"})]
     (let [result (verify/verify-file-checksums!
                   "/mnt/test"
-                  {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}})]
+                  {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}}
+                  4)]
       (is (true? (:ok result)))
       (is (= 1 (:matched result))))))
 
 (deftest verify-file-checksums-not-ok-on-mismatch
   (with-redefs [strategic-backup.manifest/compute-file-checksums
-                (fn [_ _] {"./a.txt" "sha256:wrong"})]
+                (fn [_ _ _] {"./a.txt" "sha256:wrong"})]
     (let [result (verify/verify-file-checksums!
                   "/mnt/test"
-                  {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}})]
+                  {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}}
+                  4)]
       (is (false? (:ok result)))
       (is (= 1 (count (:mismatched result)))))))
 
 (deftest verify-file-checksums-not-ok-on-missing-file
   (with-redefs [strategic-backup.manifest/compute-file-checksums
-                (fn [_ _] {})]
+                (fn [_ _ _] {})]
     (let [result (verify/verify-file-checksums!
                   "/mnt/test"
-                  {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}})]
+                  {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}}
+                  4)]
       (is (false? (:ok result)))
       (is (= ["./a.txt"] (:missing result))))))
