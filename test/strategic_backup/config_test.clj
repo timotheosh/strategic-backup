@@ -299,34 +299,28 @@
 ;; resolve-secrets tests
 ;; ---------------------------------------------------------------------------
 
-(deftest resolve-secrets-reports-all-missing-secrets
-  (testing "throws ex-info with :missing-secrets listing ALL absent required secrets"
-    ;; Override the internal getenv helper to simulate missing env vars
+(deftest resolve-secrets-reports-missing-rclone-config
+  (testing "throws ex-info with :missing-secrets when RCLONE_CONFIG is absent —
+            the sole required secret now that BACKUP_ENCRYPTION_KEY is
+            conditionally required (only when the dataset isn't ZFS-encrypted,
+            checked at point of use in core.clj/restore.clj, not here)"
     (with-redefs [strategic-backup.config/getenv (constantly nil)]
       (try
         (config/resolve-secrets valid-config)
         (is false "expected ex-info to be thrown")
         (catch clojure.lang.ExceptionInfo e
-          (let [missing (:missing-secrets (ex-data e))]
-            (is (vector? missing))
-            ;; Both required secrets must be reported
-            (is (some #{"BACKUP_ENCRYPTION_KEY"} missing))
-            (is (some #{"RCLONE_CONFIG"} missing))
-            (is (= 2 (count missing)))))))))
+          (is (= ["RCLONE_CONFIG"] (:missing-secrets (ex-data e)))))))))
 
-(deftest resolve-secrets-reports-single-missing-secret
-  (testing "throws when only one required secret is missing"
+(deftest resolve-secrets-does-not-require-backup-encryption-key
+  (testing "does not throw when BACKUP_ENCRYPTION_KEY is absent but RCLONE_CONFIG
+            is present — :encryption-key is simply nil in :secrets"
     (with-redefs [strategic-backup.config/getenv
                   (fn [k]
                     (case k
-                      "BACKUP_ENCRYPTION_KEY" "test-key-value"
+                      "RCLONE_CONFIG" "/etc/rclone.conf"
                       nil))]
-      (try
-        (config/resolve-secrets valid-config)
-        (is false "expected ex-info to be thrown")
-        (catch clojure.lang.ExceptionInfo e
-          (let [missing (:missing-secrets (ex-data e))]
-            (is (= ["RCLONE_CONFIG"] missing))))))))
+      (let [result (config/resolve-secrets valid-config)]
+        (is (nil? (get-in result [:secrets :encryption-key])))))))
 
 (deftest resolve-secrets-does-not-expose-secret-values
   (testing "exception message and ex-data contain only secret names, never values"
@@ -490,14 +484,14 @@
       (let [result (config/resolve-secrets infisical-config)]
         (is (nil? (get-in result [:secrets :zfs-encryption-passphrase])))))))
 
-(deftest resolve-secrets-infisical-mode-still-requires-encryption-key
-  (testing "BACKUP_ENCRYPTION_KEY is still required in Infisical mode — untouched, out of scope (Requirement 5.1)"
-    (with-redefs [strategic-backup.config/getenv (constantly nil)]
-      (try
-        (config/resolve-secrets infisical-config)
-        (is false "expected ex-info to be thrown")
-        (catch clojure.lang.ExceptionInfo e
-          (is (= ["BACKUP_ENCRYPTION_KEY"] (:missing-secrets (ex-data e)))))))))
+(deftest resolve-secrets-infisical-mode-does-not-require-encryption-key
+  (testing "BACKUP_ENCRYPTION_KEY is not required upfront in Infisical mode either —
+            it's only actually needed when the dataset turns out not to be
+            ZFS-encrypted, checked at point of use in core.clj/restore.clj, not here"
+    (with-redefs [strategic-backup.config/getenv (constantly nil)
+                  infisical/fetch-secret!        (constantly nil)]
+      (let [result (config/resolve-secrets infisical-config)]
+        (is (nil? (get-in result [:secrets :encryption-key])))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Property 6: Config EDN Round-Trip
@@ -549,10 +543,13 @@
 ;; Validates: Requirements 9.3
 ;; ---------------------------------------------------------------------------
 
-;; The two required secrets. PGCONNSTRING is optional and must never appear
-;; in :missing-secrets even when absent.
+;; The sole unconditionally-required secret. BACKUP_ENCRYPTION_KEY,
+;; PGCONNSTRING, and ZFS_ENCRYPTION_PASSPHRASE are all optional at this
+;; layer — they must never appear in :missing-secrets even when absent
+;; (BACKUP_ENCRYPTION_KEY's requiredness is conditional on the dataset's
+;; ZFS-encryption status, checked at point of use in core.clj/restore.clj).
 (def ^:private required-secret-names
-  ["BACKUP_ENCRYPTION_KEY" "RCLONE_CONFIG"])
+  ["RCLONE_CONFIG"])
 
 ;; Generator: a non-empty subset of the required secret names to withhold
 (def gen-secrets-to-withhold
@@ -577,8 +574,10 @@
             (let [missing-reported (set (:missing-secrets (ex-data e)))]
               ;; Every omitted required secret must appear in :missing-secrets
               (and (every? #(contains? missing-reported %) secrets-to-omit)
-                   ;; PGCONNSTRING is optional — it must never appear in :missing-secrets
+                   ;; PGCONNSTRING and BACKUP_ENCRYPTION_KEY are optional at
+                   ;; this layer — neither may ever appear in :missing-secrets
                    (not (contains? missing-reported "PGCONNSTRING"))
+                   (not (contains? missing-reported "BACKUP_ENCRYPTION_KEY"))
                    ;; :missing-secrets must be a non-empty vector/seq
                    (seq missing-reported)))))))))
 

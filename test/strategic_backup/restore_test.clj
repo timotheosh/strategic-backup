@@ -36,7 +36,7 @@
    :b2-bucket         "mybucket"
    :b2-path-prefix    "zfs-backups/"
    :encryption-cipher "aes-256-cbc"
-   :secrets           {:pg-conn-string nil}})
+   :secrets           {:pg-conn-string nil :encryption-key "test-key"}})
 
 (defn- ok-executor [] (shell/make-mock-executor))
 
@@ -369,6 +369,59 @@
               (is (= :restore (:stage (ex-data e)))))))
         (is (false? @verify-called))
         (is (true? @destroyed))
+        (finally (delete-dir staging))))))
+
+;; ---------------------------------------------------------------------------
+;; run-restore-test! — BACKUP_ENCRYPTION_KEY (openssl decryption side)
+;; ---------------------------------------------------------------------------
+
+(deftest run-restore-test-aborts-loudly-when-openssl-encrypted-and-key-missing
+  (testing "throws before the restore pipeline runs, and still cleans up, when
+            the archive needs openssl decryption but no BACKUP_ENCRYPTION_KEY
+            is configured"
+    (let [destroyed        (atom false)
+          pipeline-called  (atom false)
+          staging          (make-temp-dir)
+          config           (-> base-config
+                               (assoc :staging-dir (.getAbsolutePath staging))
+                               (assoc-in [:secrets :encryption-key] nil))]
+      (try
+        (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] sample-manifest)
+                      strategic-backup.manifest/latest-local-edn        (fn [_] nil)
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
+                                                                          (spit (str dir "/" (:archive-file sample-manifest)) "data")
+                                                                          nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
+                      strategic-backup.restore/run-restore-pipeline!    (fn [_ _] (reset! pipeline-called true) nil)
+                      strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (reset! destroyed true) nil)]
+          (try
+            (restore/run-restore-test! config (ok-executor) false)
+            (is false "expected ex-info to be thrown")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :config (:stage (ex-data e)))))))
+        (is (false? @pipeline-called))
+        (is (true? @destroyed))
+        (finally (delete-dir staging))))))
+
+(deftest run-restore-test-succeeds-with-no-key-for-zfs-encrypted-dataset
+  (testing "no BACKUP_ENCRYPTION_KEY needed when the archive was ZFS-encrypted
+            (no openssl decryption stage) — only ZFS_ENCRYPTION_PASSPHRASE matters"
+    (let [staging (make-temp-dir)
+          config  (-> base-config
+                      (assoc :staging-dir (.getAbsolutePath staging))
+                      (assoc-in [:secrets :zfs-encryption-passphrase] "s3kr3t"))]
+      (try
+        (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] encrypted-manifest)
+                      strategic-backup.manifest/latest-local-edn        (fn [_] nil)
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
+                                                                          (spit (str dir "/" (:archive-file encrypted-manifest)) "data")
+                                                                          nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
+                      strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
+                      strategic-backup.snapshot/load-key!               (fn [_ dataset _] dataset)
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.snapshot/destroy-dataset!        (fn [_ _] nil)]
+          (is (nil? (restore/run-restore-test! config (ok-executor) false))))
         (finally (delete-dir staging))))))
 
 (deftest run-restore-test-skips-key-loading-for-openssl-encrypted-dataset

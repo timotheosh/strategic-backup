@@ -127,6 +127,29 @@
       (is (not (str/includes? cmd "openssl"))))))
 
 ;; ---------------------------------------------------------------------------
+;; ensure-encryption-key-present! (BACKUP_ENCRYPTION_KEY is only required
+;; when openssl encryption/decryption will actually run — i.e. the dataset
+;; is not ZFS-encrypted; shared by core.clj's backup path and restore.clj's
+;; restore path)
+;; ---------------------------------------------------------------------------
+
+(deftest ensure-encryption-key-present-no-op-when-key-not-needed
+  (testing "does not throw when needs-key? is false, even with no key configured"
+    (is (nil? (pipeline/ensure-encryption-key-present! false nil)))))
+
+(deftest ensure-encryption-key-present-no-op-when-key-needed-and-present
+  (testing "does not throw when needs-key? is true and a key is configured"
+    (is (nil? (pipeline/ensure-encryption-key-present! true "test-key")))))
+
+(deftest ensure-encryption-key-present-throws-when-needed-and-missing
+  (testing "throws ex-info :stage :config when needs-key? is true and no key is configured"
+    (try
+      (pipeline/ensure-encryption-key-present! true nil)
+      (is false "expected ex-info to be thrown")
+      (catch clojure.lang.ExceptionInfo e
+        (is (= :config (:stage (ex-data e))))))))
+
+;; ---------------------------------------------------------------------------
 ;; extract-output-path
 ;; ---------------------------------------------------------------------------
 
