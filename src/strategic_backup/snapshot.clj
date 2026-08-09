@@ -16,17 +16,21 @@
   "Action (private). Runs `zfs <args>` via the executor.
    Returns `result-value` on success (exit 0); throws ex-info tagged with
    `stage` (plus :cmd/:exit/:err) and `error-message` on non-zero exit.
-   Shared by create-snapshot! and receive-stream!, which differ only in
-   the subcommand, stage tag, error message, and success return value."
-  [executor args stage error-message result-value]
-  (let [result (shell/run-cmd executor "zfs" args {})]
-    (when (not= 0 (:exit result))
-      (throw (ex-info error-message
-                      {:stage stage
-                       :cmd   (:cmd result)
-                       :exit  (:exit result)
-                       :err   (:err result)})))
-    result-value))
+   Shared by create-snapshot!, receive-stream!, and load-key!, which differ
+   only in the subcommand, stage tag, error message, success return value,
+   and (for load-key!) needing to pass extra opts (:in) through to the
+   shell call."
+  ([executor args stage error-message result-value]
+   (run-zfs-cmd! executor args stage error-message result-value {}))
+  ([executor args stage error-message result-value opts]
+   (let [result (shell/run-cmd executor "zfs" args opts)]
+     (when (not= 0 (:exit result))
+       (throw (ex-info error-message
+                       {:stage stage
+                        :cmd   (:cmd result)
+                        :exit  (:exit result)
+                        :err   (:err result)})))
+     result-value)))
 
 (defn create-snapshot!
   "Runs `zfs snapshot <snapshot-name>` via the executor.
@@ -50,6 +54,19 @@
    Returns test-dataset on success; throws ex-info with :stage :receive on non-zero exit."
   [executor test-dataset]
   (run-zfs-cmd! executor ["receive" test-dataset] :receive "zfs receive failed" test-dataset))
+
+(defn load-key!
+  "Loads the ZFS encryption key for `dataset` by running
+   `zfs load-key <dataset>` with `passphrase` piped to the subprocess's
+   stdin — never as a command-line argument and never written to a file,
+   so it can't leak via a process listing (same reasoning as
+   BACKUP_ENCRYPTION_KEY being passed to openssl via `-pass env:`).
+   This is the standard non-interactive way to unlock a dataset whose
+   `keylocation` is `prompt`.
+   Returns dataset on success; throws ex-info with :stage :restore on
+   non-zero exit (e.g. wrong passphrase)."
+  [executor dataset passphrase]
+  (run-zfs-cmd! executor ["load-key" dataset] :restore "zfs load-key failed" dataset {:in passphrase}))
 
 (defn destroy-dataset!
   "Runs `zfs destroy -r <dataset>` via the executor.

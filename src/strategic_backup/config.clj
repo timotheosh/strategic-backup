@@ -36,7 +36,7 @@
   ["BACKUP_ENCRYPTION_KEY" "RCLONE_CONFIG"])
 
 (def ^:private optional-secret-env-vars
-  ["PGCONNSTRING"])
+  ["PGCONNSTRING" "ZFS_ENCRYPTION_PASSPHRASE"])
 
 ;; ---------------------------------------------------------------------------
 ;; Required :infisical config-map keys (infisical-secrets spec, Requirement 1)
@@ -206,6 +206,35 @@
       (throw (ex-info "Unable to resolve B2 credential — no RCLONE_CONFIG and Infisical mode not active"
                       {:stage :secrets :credential "B2_KEY_ID"})))))
 
+(defn resolve-zfs-passphrase!
+  "Action (infisical-secrets spec, Requirement 6 — ZFS encryption
+   passphrase). Resolves the passphrase used to `zfs load-key` a received
+   ZFS-encrypted test-dataset during restore-test verification. `env-map`
+   has \"ZFS_ENCRYPTION_PASSPHRASE\" already read via getenv;
+   `infisical-config` is the :infisical config map, or nil when not in
+   Infisical mode.
+
+   NEVER throws, and unlike resolve-db-credential! above, NEVER logs
+   either — this secret is purely situational (only datasets that are
+   themselves ZFS-encrypted need it at all), so silence on absence avoids
+   noise for every deployment that doesn't use ZFS encryption.
+   restore.clj is responsible for failing loudly, but only at the point a
+   dataset actually turns out to need this and it's missing."
+  [env-map infisical-config]
+  (let [env-value (get env-map "ZFS_ENCRYPTION_PASSPHRASE")]
+    (case (credential-source env-value (some? infisical-config))
+      :env
+      env-value
+
+      :infisical
+      (try
+        (infisical/fetch-secret! infisical-config "ZFS_ENCRYPTION_PASSPHRASE")
+        (catch clojure.lang.ExceptionInfo _e
+          nil))
+
+      :missing
+      nil)))
+
 (defn read-secret-env-vars
   "Reads every required and optional secret env var (via `getenv`) into a
    plain map of env-var-name -> value-or-nil. The only thing in this
@@ -222,11 +251,13 @@
 
 (defn build-secrets-map
   "Calculation. Shapes the raw env-var map into the :secrets map attached
-   to config: {:encryption-key ... :rclone-config ... :pg-conn-string ...}."
+   to config: {:encryption-key ... :rclone-config ... :pg-conn-string ...
+   :zfs-encryption-passphrase ...}."
   [env-map]
-  {:encryption-key (get env-map "BACKUP_ENCRYPTION_KEY")
-   :rclone-config  (get env-map "RCLONE_CONFIG")
-   :pg-conn-string (get env-map "PGCONNSTRING")})
+  {:encryption-key             (get env-map "BACKUP_ENCRYPTION_KEY")
+   :rclone-config              (get env-map "RCLONE_CONFIG")
+   :pg-conn-string             (get env-map "PGCONNSTRING")
+   :zfs-encryption-passphrase  (get env-map "ZFS_ENCRYPTION_PASSPHRASE")})
 
 (defn resolve-secrets
   "Read required secrets from environment variables and attach them to config.
@@ -260,12 +291,14 @@
       (let [infisical-cfg  (:infisical config)
             rclone-config  (getenv "RCLONE_CONFIG")
             pg-conn-string (resolve-db-credential! {"PGCONNSTRING" (getenv "PGCONNSTRING")} infisical-cfg)
-            b2-result      (resolve-b2-credential! {"RCLONE_CONFIG" rclone-config} infisical-cfg)]
+            b2-result      (resolve-b2-credential! {"RCLONE_CONFIG" rclone-config} infisical-cfg)
+            zfs-passphrase (resolve-zfs-passphrase! {"ZFS_ENCRYPTION_PASSPHRASE" (getenv "ZFS_ENCRYPTION_PASSPHRASE")} infisical-cfg)]
         (assoc config :secrets
-               {:encryption-key encryption-key
-                :rclone-config  rclone-config
-                :pg-conn-string pg-conn-string
-                :b2-rclone-env  (if (= :infisical (:mode b2-result)) (:env b2-result) {})})))
+               {:encryption-key             encryption-key
+                :rclone-config              rclone-config
+                :pg-conn-string             pg-conn-string
+                :b2-rclone-env              (if (= :infisical (:mode b2-result)) (:env b2-result) {})
+                :zfs-encryption-passphrase  zfs-passphrase})))
     (let [env-map (read-secret-env-vars)
           missing (missing-required-secrets env-map)]
       (when (seq missing)

@@ -91,3 +91,19 @@
           result   (shell/run-pipeline executor pipeline)]
       (is (= 0 (:exit result)))
       (is (= pipeline (:cmd result))))))
+
+(deftest default-executor-run-cmd-forwards-in-as-subprocess-stdin
+  (testing ":in in opts is piped to the subprocess's stdin — needed so callers
+            (e.g. zfs load-key) can supply a secret without ever putting it in
+            argv or a file"
+    (let [executor (shell/make-default-executor)
+          result   (shell/run-cmd executor "cat" [] {:in "secret-passphrase"})]
+      (is (= 0 (:exit result)))
+      (is (= "secret-passphrase" (:out result))))))
+
+(deftest default-executor-run-cmd-omits-in-when-not-given
+  (testing "opts without :in behaves exactly as before (no stdin piped)"
+    (let [executor (shell/make-default-executor)
+          result   (shell/run-cmd executor "echo" ["hello"] {})]
+      (is (= 0 (:exit result)))
+      (is (= "hello\n" (:out result))))))

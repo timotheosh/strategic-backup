@@ -53,6 +53,37 @@
     (throw (ex-info "Cannot infer compression from archive filename"
                     {:stage :restore :archive-filename archive-filename}))))
 
+(defn needs-zfs-key?
+  "Calculation (ZFS encryption passphrase). True when restore-test is
+   about to verify per-file checksums (mode 1/2 only — mode 3 skips
+   verification entirely, Req 8.2) against a dataset that was
+   ZFS-natively-encrypted at backup time rather than openssl-encrypted
+   (i.e. `decrypt?` is false — see requires-openssl-decryption? above).
+   Only in that combination does the received test-dataset need its ZFS
+   key loaded before its files are readable for verification."
+  [mode decrypt?]
+  (and (not= mode 3) (not decrypt?)))
+
+(defn ensure-zfs-key-loaded!
+  "Action. Loads the ZFS encryption key for `test-dataset` via
+   snapshot/load-key! so its files are readable for verification.
+   A no-op when `needs-key?` is false.
+
+   Throws ex-info {:stage :restore} immediately — without ever attempting
+   `zfs load-key` — when `passphrase` is nil. Verification cannot proceed
+   without it, and silently skipping verification for an encrypted
+   dataset would quietly defeat the entire purpose of restore-test."
+  [executor test-dataset needs-key? passphrase]
+  (when needs-key?
+    (when (nil? passphrase)
+      (throw (ex-info (str "Cannot verify restored dataset " test-dataset
+                           " — it is ZFS-encrypted but no encryption"
+                           " passphrase is configured"
+                           " (ZFS_ENCRYPTION_PASSPHRASE via environment or Infisical)")
+                      {:stage :restore :test-dataset test-dataset})))
+    (snapshot/load-key! executor test-dataset passphrase))
+  nil)
+
 (defn run-restore-pipeline!
   "Action. Executes the restore shell pipeline (cat archive | [decrypt] |
    decompress | zfs receive) via the executor.
@@ -89,6 +120,7 @@
         pg-conn-string (get-in config [:secrets :pg-conn-string])
         ;; infisical-secrets spec, Requirement 3.3 — see core.clj's run-backup!
         b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})
+        zfs-passphrase (get-in config [:secrets :zfs-encryption-passphrase])
 
         pg-manifest    (db/fetch-latest-manifest pg-conn-string dataset)
         local-manifest (manifest/latest-local-edn staging-dir)
@@ -133,6 +165,11 @@
           (run-restore-pipeline!
            executor
            (pipeline/build-restore-pipeline-cmd archive-path compression decrypt? cipher test-dataset))
+
+          ;; ZFS encryption passphrase — the received test-dataset won't be
+          ;; readable for verification below until its key is loaded, when
+          ;; it was ZFS-natively-encrypted at backup time.
+          (ensure-zfs-key-loaded! executor test-dataset (needs-zfs-key? mode decrypt?) zfs-passphrase)
 
           ;; Req 8.1-8.5 (mode 1/2) or Req 8.2 (mode 3 — skipped, logged)
           (if (= mode 3)
