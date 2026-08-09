@@ -63,21 +63,65 @@
    :archive-file    archive-file
    :files           file-checksums})
 
+(defn format-hex
+  "Calculation. Converts a byte array into a lowercase hex string."
+  [^bytes bytes]
+  (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bytes)))
+
+(defn hash-file
+  "Action. Computes the SHA-256 hex digest of a single file's contents via
+   streaming buffered reads through java.security.MessageDigest — no
+   subprocess spawn (pipeline-timing spec, Req 1.1). Returns
+   \"sha256:<hex>\".
+
+   Throws on any read failure (permission denied, file vanished, ...) —
+   never catches. compute-file-checksums owns the decision of what to do
+   with a failure (exclude-and-continue vs. abort), not this function."
+  [^java.io.File file]
+  (let [digest (java.security.MessageDigest/getInstance "SHA-256")]
+    (with-open [in (io/input-stream file)]
+      (let [buf (byte-array 8192)]
+        (loop []
+          (let [n (.read in buf)]
+            (when (pos? n)
+              (.update digest buf 0 n)
+              (recur))))))
+    (str "sha256:" (format-hex (.digest digest)))))
+
 (defn compute-file-checksums
   "Action. Walks every regular file under `mountpoint` and computes its
-   SHA-256 checksum via `openssl dgst -sha256` (Req 2.1). Returns a map of
-   relative path (\"./...\") -> \"sha256:<hex>\"."
-  [executor mountpoint]
+   SHA-256 checksum in-process via hash-file — no subprocess spawn per
+   file (pipeline-timing spec, Req 1.1; previously shelled out to
+   `openssl dgst -sha256` once per file, which dominated wall-clock time
+   on datasets with many small files). Returns a map of relative path
+   (\"./...\") -> \"sha256:<hex>\".
+
+   `strict?` false (default posture — see core.clj/restore.clj callers):
+   a file that fails to hash is logged via log/warn and EXCLUDED from the
+   returned map — never given a nil/bogus checksum (Req 1.2/1.3). The
+   backup proceeds regardless.
+
+   `strict?` true: a hash failure is wrapped in ex-info {:stage :checksum
+   :path abs-path} and propagates immediately, aborting the caller
+   (Req 1.4) — enabled via the --strict-checksums CLI flag."
+  [mountpoint strict?]
   (let [root  (io/file mountpoint)
         files (->> (file-seq root)
                    (filter #(.isFile ^java.io.File %)))]
     (into {}
-          (map (fn [^java.io.File f]
-                 (let [abs-path (.getAbsolutePath f)
-                       result   (shell/run-cmd executor "openssl"
-                                                ["dgst" "-sha256" abs-path] {})]
-                   [(relativize-path mountpoint abs-path)
-                    (parse-openssl-checksum (:out result))])))
+          (keep (fn [^java.io.File f]
+                  (let [abs-path (.getAbsolutePath f)]
+                    (try
+                      [(relativize-path mountpoint abs-path) (hash-file f)]
+                      (catch Exception e
+                        (if strict?
+                          (throw (ex-info "Failed to checksum file"
+                                          {:stage :checksum :path abs-path}
+                                          e))
+                          (do
+                            (log/warn "Failed to checksum file — excluded from manifest"
+                                      {:path abs-path :error (.getMessage e)})
+                            nil)))))))
           files)))
 
 (defn compute-stream-checksum

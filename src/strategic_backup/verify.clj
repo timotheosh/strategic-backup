@@ -39,9 +39,13 @@
 (defn compute-actual-checksums
   "Action. Computes SHA-256 checksums for every file under `mountpoint`
    (the restored Test_Dataset). Delegates to manifest/compute-file-checksums
-   rather than re-walking the filesystem with separate logic (Req 8.1)."
-  [executor mountpoint]
-  (manifest/compute-file-checksums executor mountpoint))
+   rather than re-walking the filesystem with separate logic (Req 8.1).
+   strict? is hardcoded false — restore-test verification already has its
+   own missing/mismatch reporting (diff-checksums below); the
+   --strict-checksums flag is scoped to backup/--checksums only
+   (pipeline-timing spec)."
+  [mountpoint]
+  (manifest/compute-file-checksums mountpoint false))
 
 (defn verify-file-checksums!
   "Action. Computes actual checksums under `mountpoint` and compares them
@@ -50,9 +54,9 @@
    count (Req 8.5).
 
    Returns {:ok bool :matched N :mismatched [...] :missing [...]}."
-  [executor mountpoint manifest]
+  [mountpoint manifest]
   (let [expected (:files manifest)
-        actual   (compute-actual-checksums executor mountpoint)
+        actual   (compute-actual-checksums mountpoint)
         diff     (diff-checksums expected actual)
         ok?      (and (empty? (:mismatched diff)) (empty? (:missing diff)))]
     (if ok?

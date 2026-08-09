@@ -8,6 +8,7 @@
             [strategic-backup.retention :as retention]
             [strategic-backup.shell :as shell]
             [strategic-backup.snapshot :as snapshot]
+            [strategic-backup.timing :as timing]
             [strategic-backup.upload :as upload]
             [strategic-backup.verify :as verify]
             [taoensso.timbre :as log]))
@@ -130,7 +131,8 @@
         ;; time (see upload/ensure-b2-credentials-present!).
         _              (upload/ensure-b2-credentials-present! rclone-config b2-rclone-env)
 
-        pg-manifest    (db/fetch-latest-manifest pg-conn-string dataset)
+        pg-manifest    (timing/time-stage! :db-fetch-manifest
+                        #(db/fetch-latest-manifest pg-conn-string dataset))
         local-manifest (manifest/latest-local-edn staging-dir)
         {:keys [mode manifest]} (resolve-manifest-mode pg-manifest local-manifest skip-verify?)]
 
@@ -155,19 +157,22 @@
             compression  (if (= mode 3) (infer-compression archive-fname) (:compression manifest))
             decrypt?     (requires-openssl-decryption? mode manifest archive-fname)]
         (try
-          (upload/download-archive! executor b2-remote archive-fname staging-dir b2-rclone-env)
+          (timing/time-stage! :archive-download
+           #(upload/download-archive! executor b2-remote archive-fname staging-dir b2-rclone-env))
 
           ;; Req 7.5/7.6 — verify the stream checksum before touching the
           ;; archive at all; a mismatch aborts before decrypt/decompress.
           (when (not= mode 3)
-            (let [actual (manifest/compute-stream-checksum executor archive-path)]
-              (when-not (verify/verify-stream-checksum? (:stream-checksum manifest) actual)
-                (log/error "Stream checksum mismatch"
-                          {:expected (:stream-checksum manifest) :actual actual})
-                (throw (ex-info "Archive stream checksum verification failed"
-                                {:stage    :verify
-                                 :expected (:stream-checksum manifest)
-                                 :actual   actual})))))
+            (timing/time-stage! :stream-checksum-verify
+             (fn []
+               (let [actual (manifest/compute-stream-checksum executor archive-path)]
+                 (when-not (verify/verify-stream-checksum? (:stream-checksum manifest) actual)
+                   (log/error "Stream checksum mismatch"
+                             {:expected (:stream-checksum manifest) :actual actual})
+                   (throw (ex-info "Archive stream checksum verification failed"
+                                   {:stage    :verify
+                                    :expected (:stream-checksum manifest)
+                                    :actual   actual})))))))
 
           ;; BACKUP_ENCRYPTION_KEY is only actually required when the
           ;; archive needs openssl decryption — checked here, now that
@@ -176,9 +181,10 @@
           (pipeline/ensure-encryption-key-present! decrypt? encryption-key)
 
           ;; Req 7.7-7.12 — decrypt (if needed), decompress, zfs receive
-          (run-restore-pipeline!
-           executor
-           (pipeline/build-restore-pipeline-cmd archive-path compression decrypt? cipher test-dataset))
+          (timing/time-stage! :restore-pipeline
+           #(run-restore-pipeline!
+             executor
+             (pipeline/build-restore-pipeline-cmd archive-path compression decrypt? cipher test-dataset)))
 
           ;; ZFS encryption passphrase — the received test-dataset won't be
           ;; readable for verification below until its key is loaded, when
@@ -189,22 +195,26 @@
           (if (= mode 3)
             (log/warn "Restore verification skipped — Mode 3, no manifest available"
                       {:archive archive-fname})
-            (let [test-mountpoint (manifest/dataset-mountpoint test-dataset)
-                  result          (verify/verify-file-checksums! executor test-mountpoint manifest)]
-              (when-not (:ok result)
-                (throw (ex-info "Restore file checksum verification failed"
-                                {:stage      :verify
-                                 :mismatched (:mismatched result)
-                                 :missing    (:missing result)})))))
+            (timing/time-stage! :file-checksum-verify
+             (fn []
+               (let [test-mountpoint (manifest/dataset-mountpoint test-dataset)
+                     result          (verify/verify-file-checksums! test-mountpoint manifest)]
+                 (when-not (:ok result)
+                   (throw (ex-info "Restore file checksum verification failed"
+                                   {:stage      :verify
+                                    :mismatched (:mismatched result)
+                                    :missing    (:missing result)})))))))
 
           (log/info "Restore test complete"
                     {:mode mode :snapshot (:snapshot manifest) :archive archive-fname})
           nil
 
           (finally
-            ;; Req 8.6 — always destroy the Test_Dataset, pass or fail.
-            (snapshot/destroy-dataset! executor test-dataset)
-            ;; Req 8.7 — always delete the downloaded archive; local EDN
-            ;; manifest files are never touched by this cleanup step.
-            (let [f (io/file archive-path)]
-              (when (.exists f) (.delete f)))))))))
+            (timing/time-stage! :cleanup
+             (fn []
+               ;; Req 8.6 — always destroy the Test_Dataset, pass or fail.
+               (snapshot/destroy-dataset! executor test-dataset)
+               ;; Req 8.7 — always delete the downloaded archive; local EDN
+               ;; manifest files are never touched by this cleanup step.
+               (let [f (io/file archive-path)]
+                 (when (.exists f) (.delete f)))))))))))

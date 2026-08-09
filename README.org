@@ -249,13 +249,16 @@ exists purely to satisfy ~PRIMARY KEY~.
 :CUSTOM_ID: usage
 :END:
 #+begin_example
-$ java -jar strategic-backup.jar backup
+$ java -jar strategic-backup.jar [backup] [--strict-checksums]
 $ java -jar strategic-backup.jar restore-test [--skip-verify]
 $ java -jar strategic-backup.jar --db-test
 $ java -jar strategic-backup.jar --b2-test
+$ java -jar strategic-backup.jar --checksums [--strict-checksums]
 #+end_example
 
-- ~backup~ :: runs the full backup pipeline described above.
+- ~backup~ :: runs the full backup pipeline described above. This is the
+  default when no subcommand is given at all — a bare
+  ~java -jar strategic-backup.jar~ (e.g. from cron) runs a backup.
 - ~restore-test~ :: downloads the latest backup, decrypts/decompresses it,
   ~zfs receive~s it into ~:test-dataset~, verifies every file's checksum
   against the manifest, then always destroys the test dataset and deletes
@@ -274,12 +277,45 @@ $ java -jar strategic-backup.jar --b2-test
   and runs a lightweight ~rclone lsf~ against the configured bucket/prefix
   to confirm auth, bucket access, and network reachability, without
   uploading, downloading, or deleting anything. Logs and exits ~0~/~1~.
+- ~--checksums~ :: runs *only* file-checksum computation against
+  ~:dataset~'s mountpoint — no snapshot, no compression/encryption
+  pipeline, no B2, no database. Added to measure checksumming cost in
+  isolation on datasets with very large file counts (e.g. Syncthing sync
+  folders), where it can dominate a backup's wall-clock time. Requires
+  only ~:dataset~ — no secrets. Logs the file count, elapsed time, and
+  files/sec throughput, then exits ~0~/~1~.
+
+*** ~--strict-checksums~
+
+File checksumming (used by both ~backup~ and ~--checksums~) computes each
+file's SHA-256 in-process — no subprocess spawned per file, which used to
+dominate wall-clock time on datasets with many small files. By default, a
+file that fails to hash (permission denied, removed mid-scan, ...) is
+logged and simply excluded from the manifest; the run continues. Passing
+~--strict-checksums~ makes that same failure abort the run immediately
+instead — useful when you'd rather know about a checksum failure
+immediately than discover an incomplete manifest later.
+
+*** Per-stage timing
+
+Every major stage of ~backup~ and ~restore-test~ — snapshot creation, file
+checksumming, the send/compress/encrypt pipeline and its reverse on
+restore, stream and per-file checksum verification, database reads and
+writes, B2 upload/download, retention enforcement, and cleanup — logs its
+own elapsed wall-clock time as it completes:
+
+#+begin_example
+INFO [strategic-backup.timing] - Stage complete {:stage :b2-upload, :elapsed-ms 143201}
+#+end_example
+
+This is what to grep for when a run is slower than expected — no external
+timing wrapper needed.
 
 Exit code is ~0~ on success, non-zero on any failure — pipe stage, config
 error, or verification failure — so a scheduler can detect and alert on it.
-This applies to ~--db-test~/~--b2-test~ too, so they're safe to drop into
-a deploy script or pre-flight cron check: ~strategic-backup --db-test &&
-strategic-backup --b2-test && echo "ready"~.
+This applies to ~--db-test~/~--b2-test~/~--checksums~ too, so they're safe
+to drop into a deploy script or pre-flight cron check: ~strategic-backup
+--db-test && strategic-backup --b2-test && echo "ready"~.
 
 ** Scheduling with cron
 :PROPERTIES:

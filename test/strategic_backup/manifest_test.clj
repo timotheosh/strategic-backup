@@ -100,6 +100,43 @@
     (is (= {"./foo.txt" "sha256:def456"} (:files m)))))
 
 ;; ---------------------------------------------------------------------------
+;; format-hex
+;; ---------------------------------------------------------------------------
+
+(deftest format-hex-converts-bytes-to-lowercase-hex
+  (testing "known byte values convert to their known lowercase hex string"
+    (is (= "00ff7f" (manifest/format-hex (byte-array [0 -1 127]))))
+    (is (= "" (manifest/format-hex (byte-array 0))))))
+
+;; ---------------------------------------------------------------------------
+;; hash-file — real temp files, independently-verified digests
+;; (via `printf '%s' "<content>" | shasum -a 256`)
+;; ---------------------------------------------------------------------------
+
+(deftest hash-file-computes-known-sha256-of-known-content
+  (let [dir (make-temp-dir)]
+    (try
+      (let [hello (io/file dir "hello.txt")
+            empty (io/file dir "empty.txt")
+            world (io/file dir "world.txt")]
+        (spit hello "hello")
+        (spit empty "")
+        (spit world "world")
+        (is (= "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+               (manifest/hash-file hello)))
+        (is (= "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+               (manifest/hash-file empty)))
+        (is (= "sha256:486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7"
+               (manifest/hash-file world))))
+      (finally (delete-dir dir)))))
+
+(deftest hash-file-throws-on-read-failure
+  (testing "propagates the I/O failure rather than catching it — compute-file-checksums
+            owns the catch/exclude-or-propagate decision, not hash-file itself"
+    (is (thrown? java.io.IOException
+                 (manifest/hash-file (io/file "/nonexistent/definitely/not/a/real/path.txt"))))))
+
+;; ---------------------------------------------------------------------------
 ;; compute-file-checksums
 ;; ---------------------------------------------------------------------------
 
@@ -109,11 +146,59 @@
       (spit (io/file dir "a.txt") "hello")
       (.mkdirs (io/file dir "sub"))
       (spit (io/file dir "sub" "b.txt") "world")
-      (let [result (manifest/compute-file-checksums (openssl-executor) (.getAbsolutePath dir))]
+      (let [result (manifest/compute-file-checksums (.getAbsolutePath dir) false)]
         (is (= 2 (count result)))
-        (is (every? #(str/starts-with? % "./") (keys result)))
-        (is (every? #(str/starts-with? % "sha256:") (vals result))))
+        (is (= "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+               (get result "./a.txt")))
+        (is (= "sha256:486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7"
+               (get result "./sub/b.txt"))))
       (finally (delete-dir dir)))))
+
+(deftest compute-file-checksums-empty-dir-returns-empty-map
+  (let [dir (make-temp-dir)]
+    (try
+      (is (= {} (manifest/compute-file-checksums (.getAbsolutePath dir) false)))
+      (finally (delete-dir dir)))))
+
+(deftest compute-file-checksums-non-strict-excludes-failed-file-not-nil
+  (testing "a file that fails to hash is entirely absent from the result map —
+            never present with a nil/bogus checksum (the fix for the silent
+            manifest-corruption bug)"
+    (let [dir            (make-temp-dir)
+          real-hash-file manifest/hash-file]
+      (try
+        (spit (io/file dir "good.txt") "hello")
+        (spit (io/file dir "bad.txt") "world")
+        (with-redefs [manifest/hash-file
+                      (fn [f]
+                        (if (= "bad.txt" (.getName ^java.io.File f))
+                          (throw (java.io.IOException. "simulated failure"))
+                          (real-hash-file f)))]
+          (let [result (manifest/compute-file-checksums (.getAbsolutePath dir) false)]
+            (is (= 1 (count result)))
+            (is (contains? result "./good.txt"))
+            (is (not (contains? result "./bad.txt")))
+            (is (not (contains? (set (vals result)) nil)))))
+        (finally (delete-dir dir))))))
+
+(deftest compute-file-checksums-strict-throws-on-first-failure
+  (testing "strict? true propagates the failure as ex-info :stage :checksum,
+            instead of excluding the file and continuing"
+    (let [dir            (make-temp-dir)
+          real-hash-file manifest/hash-file]
+      (try
+        (spit (io/file dir "bad.txt") "world")
+        (with-redefs [manifest/hash-file
+                      (fn [f]
+                        (if (= "bad.txt" (.getName ^java.io.File f))
+                          (throw (java.io.IOException. "simulated failure"))
+                          (real-hash-file f)))]
+          (try
+            (manifest/compute-file-checksums (.getAbsolutePath dir) true)
+            (is false "expected ex-info to be thrown")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :checksum (:stage (ex-data e)))))))
+        (finally (delete-dir dir))))))
 
 ;; ---------------------------------------------------------------------------
 ;; compute-stream-checksum
