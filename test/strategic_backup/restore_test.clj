@@ -36,7 +36,7 @@
    :b2-bucket         "mybucket"
    :b2-path-prefix    "zfs-backups/"
    :encryption-cipher "aes-256-cbc"
-   :secrets           {:pg-conn-string nil :encryption-key "test-key"}})
+   :secrets           {:pg-conn-string nil :encryption-key "test-key" :rclone-config "/etc/rclone.conf"}})
 
 (defn- ok-executor [] (shell/make-mock-executor))
 
@@ -444,6 +444,24 @@
           (restore/run-restore-test! config (ok-executor) false))
         (is (false? @load-key-called))
         (finally (delete-dir staging))))))
+
+;; ---------------------------------------------------------------------------
+;; run-restore-test! — B2 credentials (same point-of-use enforcement as
+;; core.clj's run-backup!, so --db-test isn't blocked by a missing one)
+;; ---------------------------------------------------------------------------
+
+(deftest run-restore-test-throws-before-any-work-when-no-b2-credentials
+  (testing "aborts with :stage :secrets, before ever fetching a manifest, when
+            neither RCLONE_CONFIG nor Infisical B2 credentials are configured"
+    (let [fetch-called (atom false)
+          config       (assoc-in base-config [:secrets :rclone-config] nil)]
+      (with-redefs [strategic-backup.db/fetch-latest-manifest (fn [_ _] (reset! fetch-called true) nil)]
+        (try
+          (restore/run-restore-test! config (ok-executor) false)
+          (is false "expected ex-info to be thrown")
+          (catch clojure.lang.ExceptionInfo e
+            (is (= :secrets (:stage (ex-data e)))))))
+      (is (false? @fetch-called)))))
 
 (deftest run-restore-test-throws-when-no-archive-available
   (testing "throws ex-info :stage :restore when there is nothing to restore"

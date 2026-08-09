@@ -72,20 +72,28 @@ from environment variables:
 | Variable                     | Required? | Purpose                                              |
 |-------------------------------+-----------+-------------------------------------------------------|
 | ~BACKUP_ENCRYPTION_KEY~       | No\*      | ~openssl enc~ passphrase (via ~-pass env:~, never argv) |
-| ~RCLONE_CONFIG~               | Yes\*\*   | Path to an rclone config file with a B2 remote        |
+| ~RCLONE_CONFIG~               | No\*\*    | Path to an rclone config file with a B2 remote        |
 | ~PGCONNSTRING~                | No        | Postgres/CockroachDB connection string (JDBC-style)   |
 | ~ZFS_ENCRYPTION_PASSPHRASE~   | No\*      | Passphrase to ~zfs load-key~ a ZFS-encrypted ~:test-dataset~ during ~restore-test~ |
+
+None of these are checked at startup, or by every subcommand — each is only
+required by the specific subcommand(s) that actually touch it, and only
+checked right before it's used there. Missing one you genuinely need still
+aborts loudly, just later and more specifically, rather than crashing every
+subcommand indiscriminately: e.g. ~--db-test~ never touches B2 at all, so a
+missing ~RCLONE_CONFIG~ doesn't affect it; only ~backup~ and ~restore-test~
+(which both need to reach B2) check for it.
 
 \* ~BACKUP_ENCRYPTION_KEY~ and ~ZFS_ENCRYPTION_PASSPHRASE~ are mirror images of
 each other, and between the two of them exactly one is actually needed for
 any given dataset (see the table in [[#zfs-encryption-passphrase][ZFS encryption passphrase]] below).
-Neither is checked at startup — whichever one a given run turns out to need
-is checked right before it's used, so a run never aborts over a secret it
-was never going to touch. Getting it wrong (needed but missing/wrong) still
-aborts loudly, just later: mid-~backup~ before anything is uploaded, or
-mid-~restore-test~ before cleanup runs (cleanup itself always still happens).
 
-\*\* Not required if using Infisical mode for B2 credentials — see below.
+\*\* Not needed at all if using Infisical mode with B2_KEY_ID/B2_APPLICATION_KEY
+stored there instead — see [[#optional-infisical][Infisical for database and B2 credentials]] below.
+Otherwise required by ~backup~ and ~restore-test~ (both reach B2); not
+required by ~--db-test~ or ~--b2-test~ itself (a missing/bad B2 credential
+there is exactly what ~--b2-test~ is meant to report, via ~{:ok false ...}~,
+not a startup crash).
 
 **** PGCONNSTRING format
 :PROPERTIES:
