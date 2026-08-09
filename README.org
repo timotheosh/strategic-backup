@@ -62,6 +62,36 @@ All keys above are required — a missing or unparseable config file, or a
 config missing any of these keys, aborts the run with every missing key
 logged at once.
 
+*** ~:checksum-concurrency~ (optional)
+:PROPERTIES:
+:CUSTOM_ID: checksum-concurrency
+:END:
+File checksumming (used by ~backup~ and ~--checksums~, see below) hashes
+files in-process — no subprocess spawned per file — but on a real
+deployment even that wasn't enough: a ~--checksums~ run over 131,298 files
+took 26 minutes at only 22% CPU utilization, averaging ~11.8ms/file,
+consistent with rotational-disk seek latency (this pool was 4 spinning
+disks in a RAID). The bottleneck was disk I/O wait, not hashing.
+
+~:checksum-concurrency~ controls how many files are hashed concurrently —
+defaults to *4* when absent from ~config.edn~. With multiple physical
+disks backing the pool, concurrent reads let different files be serviced
+by different spindles at once, instead of one strictly-sequential
+open→read→close cycle per file. Tune it to your storage: more spindles
+(or SSD/NVMe, where seek latency isn't a factor) can generally sustain
+higher concurrency; a single spinning disk may see little benefit, or
+even regress, past a small number.
+
+#+begin_example
+{...
+ :checksum-concurrency 4
+ ...}
+#+end_example
+
+Concurrency only affects wall-clock duration — the resulting checksums,
+which files are included/excluded, and ~--strict-checksums~'s abort
+behavior are all identical regardless of this value.
+
 *** Secrets
 :PROPERTIES:
 :CUSTOM_ID: secrets
@@ -289,9 +319,11 @@ $ java -jar strategic-backup.jar --checksums [--strict-checksums]
 
 File checksumming (used by both ~backup~ and ~--checksums~) computes each
 file's SHA-256 in-process — no subprocess spawned per file, which used to
-dominate wall-clock time on datasets with many small files. By default, a
-file that fails to hash (permission denied, removed mid-scan, ...) is
-logged and simply excluded from the manifest; the run continues. Passing
+dominate wall-clock time on datasets with many small files — and, since
+disk I/O rather than hashing itself is often the real bottleneck, up to
+[[#checksum-concurrency][~:checksum-concurrency~]] files at once. By default, a file that fails to
+hash (permission denied, removed mid-scan, ...) is logged and simply
+excluded from the manifest; the run continues. Passing
 ~--strict-checksums~ makes that same failure abort the run immediately
 instead — useful when you'd rather know about a checksum failure
 immediately than discover an incomplete manifest later.

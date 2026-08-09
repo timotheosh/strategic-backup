@@ -43,9 +43,11 @@
    strict? is hardcoded false — restore-test verification already has its
    own missing/mismatch reporting (diff-checksums below); the
    --strict-checksums flag is scoped to backup/--checksums only
-   (pipeline-timing spec)."
-  [mountpoint]
-  (manifest/compute-file-checksums mountpoint false))
+   (pipeline-timing spec). `concurrency` is threaded through unchanged
+   (Req 4.3) — restore-test verification walks a comparably large file
+   set to backup and benefits equally from concurrent hashing."
+  [mountpoint concurrency]
+  (manifest/compute-file-checksums mountpoint false concurrency))
 
 (defn verify-file-checksums!
   "Action. Computes actual checksums under `mountpoint` and compares them
@@ -54,9 +56,9 @@
    count (Req 8.5).
 
    Returns {:ok bool :matched N :mismatched [...] :missing [...]}."
-  [mountpoint manifest]
+  [mountpoint manifest concurrency]
   (let [expected (:files manifest)
-        actual   (compute-actual-checksums mountpoint)
+        actual   (compute-actual-checksums mountpoint concurrency)
         diff     (diff-checksums expected actual)
         ok?      (and (empty? (:mismatched diff)) (empty? (:missing diff)))]
     (if ok?
