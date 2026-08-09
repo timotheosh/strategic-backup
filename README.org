@@ -77,6 +77,31 @@ from environment variables:
 
 \* Not required if using Infisical mode for B2 credentials — see below.
 
+**** PGCONNSTRING format
+:PROPERTIES:
+:CUSTOM_ID: pgconnstring-format
+:END:
+~PGCONNSTRING~ is handed directly to ~next.jdbc/get-datasource~, so it must
+be a full JDBC URL, not just a bare connection string. Works identically
+whether the target is PostgreSQL or CockroachDB — both speak the same
+wire protocol and use the same ~org.postgresql~ JDBC driver:
+
+#+begin_example
+jdbc:postgresql://myuser:mypassword@localhost:26257/backups?sslmode=verify-full&sslrootcert=/etc/strategic-backup/ca.crt
+#+end_example
+
+| Piece         | Example                    | Notes                                                        |
+|----------------+-----------------------------+----------------------------------------------------------------|
+| scheme         | ~jdbc:postgresql://~       | Required — this goes to ~DriverManager~, which needs the ~jdbc:~ prefix |
+| user:password  | ~myuser:mypassword@~       | URL-encode either if they contain ~@ : / ? &~ (e.g. a literal ~@~ becomes ~%40~) |
+| host:port      | ~localhost:26257~          | CockroachDB defaults to ~26257~; PostgreSQL defaults to ~5432~ |
+| /dbname        | ~/backups~                 | Must match the database you create the table in below         |
+| ?params        | ~sslmode=...&sslrootcert=...~ | Optional. CockroachDB requires TLS by default (secure mode) — omit both for a local ~--insecure~ cluster, or plain non-TLS PostgreSQL |
+
+This is entirely optional — see [[#database-setup][Database setup]] below for what it's
+for, and omit ~PGCONNSTRING~ entirely (or its Infisical equivalent) if you
+don't want manifest persistence at all.
+
 **** Optional: Infisical for database and B2 credentials
 :PROPERTIES:
 :CUSTOM_ID: optional-infisical
@@ -108,6 +133,46 @@ Store these secrets in the Infisical project when using this mode:
 fatal — the database is always optional). A missing or failed B2 fetch
 *does* abort the run, since the backup can't reach the remote without it.
 
+*** Database setup (optional)
+:PROPERTIES:
+:CUSTOM_ID: database-setup
+:END:
+Skip this entirely if you don't set ~PGCONNSTRING~ — manifest persistence
+is a convenience index only, and the backup/restore pipeline is fully
+functional without a database.
+
+If you do want it, create one table. This exact DDL works unmodified on
+either PostgreSQL (13+) or CockroachDB — both are driven through the same
+~org.postgresql~ JDBC driver and both support ~UUID~/~JSONB~/~TIMESTAMPTZ~
+and a built-in ~gen_random_uuid()~ natively:
+
+#+begin_example
+CREATE TABLE backup_manifests (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  snapshot   TEXT NOT NULL,
+  manifest   JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+#+end_example
+
+Run it with whichever client matches your database:
+
+#+begin_example
+$ psql "$PGCONNSTRING" -c "CREATE TABLE backup_manifests ( ... );"       # PostgreSQL
+$ cockroach sql --url "$PGCONNSTRING" -e "CREATE TABLE backup_manifests ( ... );"  # CockroachDB
+#+end_example
+
+(On PostgreSQL older than 13, ~gen_random_uuid()~ isn't built in yet — run
+~CREATE EXTENSION IF NOT EXISTS pgcrypto;~ first, or switch ~id~ to
+~SERIAL PRIMARY KEY~ instead. CockroachDB has it natively at any version;
+note that CockroachDB additionally warns that sequential IDs like
+~SERIAL~ cause write hotspotting on a distributed cluster, so
+~gen_random_uuid()~ is the recommended default there regardless.)
+
+The application never creates or migrates this table itself, and only
+ever touches the ~snapshot~, ~manifest~, and ~created_at~ columns — ~id~
+exists purely to satisfy ~PRIMARY KEY~.
+
 ** Usage
 :PROPERTIES:
 :CUSTOM_ID: usage
@@ -115,6 +180,8 @@ fatal — the database is always optional). A missing or failed B2 fetch
 #+begin_example
 $ java -jar strategic-backup.jar backup
 $ java -jar strategic-backup.jar restore-test [--skip-verify]
+$ java -jar strategic-backup.jar --db-test
+$ java -jar strategic-backup.jar --b2-test
 #+end_example
 
 - ~backup~ :: runs the full backup pipeline described above.
@@ -125,9 +192,23 @@ $ java -jar strategic-backup.jar restore-test [--skip-verify]
   from PostgreSQL/CockroachDB, else the newest local EDN manifest, else
   (or with ~--skip-verify~) restores the latest archive with no
   verification at all, clearly logged as skipped.
+- ~--db-test~ :: resolves ~PGCONNSTRING~ (env var or Infisical, whichever
+  ~config.edn~ is set up for) exactly as a real ~backup~/~restore-test~
+  run would, then attempts a connection and a trivial query. Logs and
+  exits ~0~/~1~ — nothing else runs. Useful as a pre-deploy or cron
+  pre-flight check, or just to sanity-check a connection string without
+  reaching for ~psql~/~cockroach sql~ separately.
+- ~--b2-test~ :: same idea for B2 — resolves rclone credentials (env var
+  ~RCLONE_CONFIG~ file, or Infisical's ~B2_KEY_ID~/~B2_APPLICATION_KEY~)
+  and runs a lightweight ~rclone lsf~ against the configured bucket/prefix
+  to confirm auth, bucket access, and network reachability, without
+  uploading, downloading, or deleting anything. Logs and exits ~0~/~1~.
 
 Exit code is ~0~ on success, non-zero on any failure — pipe stage, config
 error, or verification failure — so a scheduler can detect and alert on it.
+This applies to ~--db-test~/~--b2-test~ too, so they're safe to drop into
+a deploy script or pre-flight cron check: ~strategic-backup --db-test &&
+strategic-backup --b2-test && echo "ready"~.
 
 ** Scheduling with cron
 :PROPERTIES:
@@ -207,6 +288,23 @@ systemd timers, so a transient SMF service still needs something
 (typically cron) to trigger it on a schedule — SMF alone doesn't replace
 cron's role here, it only replaces the env-file/wrapper-script for secret
 injection.
+
+** Future work
+:PROPERTIES:
+:CUSTOM_ID: future-work
+:END:
+- *TODO: drop the ~rclone~ dependency in favor of the native Backblaze B2
+  API.* Every remote operation (~upload/rclone-copy!~, ~list-remote~,
+  ~download-archive!~, ~delete-remote!~, ~test-connection!~) currently
+  shells out to ~rclone~. B2's own HTTP API would remove an external
+  binary dependency, give direct access to B2-specific features (e.g.
+  lifecycle rules, large-file multipart uploads) that ~rclone~ only
+  exposes indirectly if at all, and let ~:secrets :b2-rclone-env~ become
+  real HTTP client credentials instead of environment variables shaped to
+  match one particular tool's config format. Not a current requirement —
+  ~rclone~ works and is well-tested here — but worth revisiting if
+  ~rclone~ becomes a maintenance burden or a specific B2 API feature is
+  needed.
 
 ** License
 :PROPERTIES:

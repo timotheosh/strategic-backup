@@ -4,7 +4,9 @@
    CLI subcommands:
      backup          — run the full backup pipeline
      restore-test    — run the automated restore verification test
-       --skip-verify   forces Mode 3 (no checksum verification)"
+       --skip-verify   forces Mode 3 (no checksum verification)
+     --db-test       — test the configured database connection and exit
+     --b2-test       — test the configured B2/rclone connection and exit"
   (:require [clojure.java.io :as io]
             [strategic-backup.config :as config]
             [strategic-backup.db :as db]
@@ -23,6 +25,31 @@
 ;; Backup pipeline
 ;; ---------------------------------------------------------------------------
 
+(def ^:private db-persist-timeout-ms
+  "How long run-backup! waits for the async DB persist future (step 8/13)
+   before giving up on it. System/exit does not wait for background
+   threads, so without this bound, a slow-to-fail DB connection (e.g. an
+   unreachable host taking a long time to time out) could get silently
+   killed mid-attempt — including its own failure-logging catch block —
+   whenever the rest of the backup pipeline finishes first."
+  10000)
+
+(defn await-db-persist!
+  "Action. Blocks up to `timeout-ms` for `persist-future` (the async DB
+   persist kicked off in run-backup!'s step 8) to finish, so a failure —
+   or a timeout itself — is reliably logged before the process exits,
+   instead of the future being silently killed mid-flight by System/exit
+   racing an in-flight connection attempt.
+
+   Never throws, never blocks longer than `timeout-ms`, and never affects
+   the backup's outcome either way (Req 12.2) — this is purely about
+   making sure the warning, if any, is actually observed."
+  [persist-future timeout-ms]
+  (let [result (deref persist-future timeout-ms ::timed-out)]
+    (when (= result ::timed-out)
+      (log/warn "Async DB persist did not finish before timeout"
+                {:timeout-ms timeout-ms}))))
+
 (defn run-backup!
   "Orchestrate the full backup pipeline.
 
@@ -34,11 +61,14 @@
      5.  manifest/compute-stream-checksum
      6.  manifest/build-manifest
      7.  manifest/write-edn!
-     8.  db/persist-manifest!    (fire-and-forget, does not abort on failure)
+     8.  db/persist-manifest!    (async, fire-and-forget — does not block
+                                  or abort on failure)
      9.  upload/rclone-copy!
      10. retention/enforce-retention!
      11. delete local archive
      12. manifest/prune-local-edns!
+     13. await-db-persist!       (bounded wait for step 8, so its outcome
+                                  is logged before the process can exit)
 
    Returns nil on success.
    Throws ex-info (with :stage context) on any pipeline failure."
@@ -100,14 +130,18 @@
                          zfs-enc? compression archive-fname file-checksums)
 
           ;; 7. Write manifest EDN to staging dir
-          edn-path      (manifest/write-edn! the-manifest staging-dir)]
+          edn-path      (manifest/write-edn! the-manifest staging-dir)
 
-      ;; 8. Persist to PostgreSQL (fire-and-forget — never aborts backup)
-      (future
-        (try
-          (db/persist-manifest! pg-conn-string the-manifest)
-          (catch Exception e
-            (log/warn "Async DB persist failed:" (.getMessage e)))))
+          ;; 8. Persist to PostgreSQL (async, fire-and-forget — never
+          ;; blocks or aborts the backup, Req 12.2). Its outcome is
+          ;; awaited with a bounded timeout at step 13 below, once
+          ;; everything else is done, so a failure is reliably logged
+          ;; before the process can exit out from under it.
+          persist-future (future
+                           (try
+                             (db/persist-manifest! pg-conn-string the-manifest)
+                             (catch Exception e
+                               (log/warn "Async DB persist failed:" (.getMessage e)))))]
 
       ;; 9. Upload archive to B2 (manifest EDN is NOT uploaded)
       (upload/rclone-copy! executor archive-path b2-remote b2-rclone-env)
@@ -128,8 +162,46 @@
       ;; 12. Prune old local EDN manifests
       (manifest/prune-local-edns! staging-dir local-retention)
 
+      ;; 13. Bounded wait for step 8's outcome to be logged (see
+      ;; await-db-persist!'s docstring) — never blocks past the timeout,
+      ;; never affects this function's own return value.
+      (await-db-persist! persist-future db-persist-timeout-ms)
+
       (log/info "Backup complete" {:snapshot snap-name :archive archive-fname})
       nil)))
+
+;; ---------------------------------------------------------------------------
+;; Connectivity tests (--db-test / --b2-test)
+;; ---------------------------------------------------------------------------
+
+(defn run-db-test!
+  "Action (--db-test CLI flag). Attempts to connect to the database using
+   whichever :pg-conn-string resolve-secrets resolved — env var or
+   Infisical, exactly as a real backup/restore-test run would — and logs
+   the result.
+   Returns {:ok true} or {:ok false :error \"...\"}; never throws."
+  [config]
+  (let [pg-conn-string (get-in config [:secrets :pg-conn-string])
+        result         (db/test-connection! pg-conn-string)]
+    (if (:ok result)
+      (log/info "Database connection test succeeded")
+      (log/error "Database connection test failed" {:error (:error result)}))
+    result))
+
+(defn run-b2-test!
+  "Action (--b2-test CLI flag). Attempts to reach the configured B2 remote
+   using whichever rclone credentials resolve-secrets resolved — env var
+   (RCLONE_CONFIG file) or Infisical, exactly as a real backup run would —
+   and logs the result.
+   Returns {:ok true} or {:ok false :error \"...\"}; never throws."
+  [config executor]
+  (let [b2-remote     (upload/remote-target (:b2-bucket config) (:b2-path-prefix config))
+        b2-rclone-env (get-in config [:secrets :b2-rclone-env] {})
+        result        (upload/test-connection! executor b2-remote b2-rclone-env)]
+    (if (:ok result)
+      (log/info "B2 connection test succeeded" {:remote b2-remote})
+      (log/error "B2 connection test failed" {:remote b2-remote :error (:error result)}))
+    result))
 
 ;; ---------------------------------------------------------------------------
 ;; Restore test entry point
@@ -161,7 +233,9 @@
 
    Usage:
      strategic-backup backup
-     strategic-backup restore-test [--skip-verify]"
+     strategic-backup restore-test [--skip-verify]
+     strategic-backup --db-test
+     strategic-backup --b2-test"
   [& args]
   (let [subcommand   (first args)
         skip-verify? (some #{"--skip-verify"} (rest args))
@@ -179,8 +253,14 @@
           (do (run-restore-test-cmd! cfg executor (boolean skip-verify?))
               (exit! 0))
 
+          "--db-test"
+          (exit! (if (:ok (run-db-test! cfg)) 0 1))
+
+          "--b2-test"
+          (exit! (if (:ok (run-b2-test! cfg executor)) 0 1))
+
           (do (log/error "Unknown subcommand:" subcommand
-                         "Valid subcommands: backup, restore-test")
+                         "Valid subcommands: backup, restore-test, --db-test, --b2-test")
               (exit! 1))))
       (catch clojure.lang.ExceptionInfo e
         (log/error "Pipeline failed" {:stage   (:stage (ex-data e))

@@ -135,6 +135,29 @@
         (is (not (.exists (io/file (.getAbsolutePath staging) (:archive-file sample-manifest)))))
         (finally (delete-dir staging))))))
 
+(deftest run-restore-test-destroys-stale-test-dataset-before-receiving
+  (testing "destroys the test dataset defensively BEFORE zfs receive, in addition to the always-cleanup at the end
+            (self-heals a dataset left behind by an abnormally-terminated previous run, since zfs receive
+            fails outright if the destination already exists)"
+    (let [call-log (atom [])
+          staging  (make-temp-dir)
+          config   (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] sample-manifest)
+                      strategic-backup.manifest/latest-local-edn        (fn [_] nil)
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
+                                                                          (swap! call-log conj :download)
+                                                                          (spit (str dir "/" (:archive-file sample-manifest)) "data")
+                                                                          nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
+                      strategic-backup.restore/run-restore-pipeline!    (fn [_ _] (swap! call-log conj :pipeline) nil)
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (swap! call-log conj :destroy) nil)]
+          (restore/run-restore-test! config (ok-executor) false))
+        ;; destroy must appear before the pipeline (pre-cleanup) AND after it (Req 8.6 cleanup)
+        (is (= [:destroy :download :pipeline :destroy] @call-log))
+        (finally (delete-dir staging))))))
+
 (deftest run-restore-test-mode-3-skips-verification
   (testing "mode 3 (skip-verify) downloads the latest archive and skips checksum verification"
     (let [verify-called (atom false)

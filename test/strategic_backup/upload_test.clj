@@ -131,6 +131,34 @@
       (is (empty? (upload/list-remote executor "b2:bucket"))))))
 
 ;; ---------------------------------------------------------------------------
+;; test-connection! (--b2-test CLI flag)
+;; ---------------------------------------------------------------------------
+
+(deftest test-connection-succeeds-on-exit-zero
+  (testing "returns {:ok true} on a successful rclone lsf, even for an empty bucket"
+    (is (= {:ok true} (upload/test-connection! (ok-executor) "b2:bucket")))))
+
+(deftest test-connection-fails-on-non-zero-exit
+  (testing "returns {:ok false :error ...} without throwing on failure"
+    (let [result (upload/test-connection! (fail-executor) "b2:bucket")]
+      (is (false? (:ok result)))
+      (is (= "connection refused" (:error result))))))
+
+(deftest test-connection-forwards-env-to-shell-run-cmd
+  (testing "an explicit env map is forwarded into shell/run-cmd's opts"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/test-connection! nil "b2:bucket" {"RCLONE_CONFIG_B2_TYPE" "b2"})
+        (is (= {:env {"RCLONE_CONFIG_B2_TYPE" "b2"}} @captured-opts))))))
+
+(deftest test-connection-legacy-arity-uses-empty-env
+  (testing "omitting env (2-arg call) reproduces today's behavior exactly — {:env {}}"
+    (let [captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ _ opts] (reset! captured-opts opts) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/test-connection! nil "b2:bucket")
+        (is (= {:env {}} @captured-opts))))))
+
+;; ---------------------------------------------------------------------------
 ;; download-archive!
 ;; ---------------------------------------------------------------------------
 

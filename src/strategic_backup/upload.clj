@@ -70,13 +70,36 @@
        {:ok true}
        {:ok false :error (:err result)}))))
 
+(defn- rclone-lsf!
+  "Action (private). Runs `rclone lsf <remote>` and returns the raw shell
+   result map. Shared by `list-remote` (parses the listing) and
+   `test-connection!` (only cares about success/failure) so the shell
+   call itself isn't duplicated between them."
+  [executor remote env]
+  (shell/run-cmd executor "rclone" ["lsf" remote] {:env env}))
+
 (defn list-remote
   "Action. Lists archive filenames present at `remote` via `rclone lsf`.
    See `rclone-copy!` for `env` (Requirement 3.3).
    Returns an empty seq (rather than throwing) when the command fails."
   ([executor remote] (list-remote executor remote {}))
   ([executor remote env]
-   (let [result (shell/run-cmd executor "rclone" ["lsf" remote] {:env env})]
+   (let [result (rclone-lsf! executor remote env)]
      (if (= 0 (:exit result))
        (parse-lsf-output (:out result))
        []))))
+
+(defn test-connection!
+  "Action (--b2-test CLI flag). Attempts `rclone lsf <remote>` as a
+   lightweight connectivity/credentials check — exercises B2 auth, bucket
+   access, and network reachability without uploading, downloading, or
+   deleting anything. See `rclone-copy!` for `env` (Requirement 3.3).
+
+   Never throws — returns {:ok true} on success (exit 0, even for an
+   empty bucket) or {:ok false :error \"...\"} on failure."
+  ([executor remote] (test-connection! executor remote {}))
+  ([executor remote env]
+   (let [result (rclone-lsf! executor remote env)]
+     (if (= 0 (:exit result))
+       {:ok true}
+       {:ok false :error (:err result)}))))

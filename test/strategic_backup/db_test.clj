@@ -53,3 +53,30 @@
                   jdbc/execute!       (fn [_ _] (throw (ex-info "connection refused" {})))]
       (is (thrown? clojure.lang.ExceptionInfo
                    (db/persist-manifest! "postgres://localhost/db" {:snapshot "s"}))))))
+
+;; ---------------------------------------------------------------------------
+;; test-connection! (--db-test CLI flag)
+;; ---------------------------------------------------------------------------
+
+(deftest test-connection-fails-when-conn-string-nil
+  (testing "returns {:ok false ...} without attempting a connection when pg-conn-string is nil"
+    (let [get-datasource-called (atom false)]
+      (with-redefs [jdbc/get-datasource (fn [_] (reset! get-datasource-called true) nil)]
+        (let [result (db/test-connection! nil)]
+          (is (false? (:ok result)))
+          (is (string? (:error result)))
+          (is (false? @get-datasource-called)))))))
+
+(deftest test-connection-succeeds-on-a-working-connection
+  (testing "returns {:ok true} when the trivial query succeeds"
+    (with-redefs [jdbc/get-datasource (fn [_] :fake-datasource)
+                  jdbc/execute!       (fn [_ _] [{}])]
+      (is (= {:ok true} (db/test-connection! "postgres://localhost/db"))))))
+
+(deftest test-connection-never-throws-on-failure
+  (testing "returns {:ok false :error ...} instead of throwing when the connection fails"
+    (with-redefs [jdbc/get-datasource (fn [_] :fake-datasource)
+                  jdbc/execute!       (fn [_ _] (throw (ex-info "connection refused" {})))]
+      (let [result (db/test-connection! "postgres://localhost/db")]
+        (is (false? (:ok result)))
+        (is (= "connection refused" (:error result)))))))

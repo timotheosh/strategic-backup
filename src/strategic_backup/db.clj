@@ -51,6 +51,25 @@
                       (manifest->json manifest)])
       {:ok true})))
 
+(defn test-connection!
+  "Action (--db-test CLI flag). Attempts to connect to `pg-conn-string` and
+   run a trivial query (`SELECT 1`).
+
+   Never throws — returns {:ok true} on success or {:ok false :error
+   \"...\"} on any failure, including `pg-conn-string` being nil (no
+   PGCONNSTRING configured via env or Infisical). Unlike
+   persist-manifest!/fetch-latest-manifest, this is meant to be checked
+   and acted on directly by the caller (exit code), not fired-and-forgotten."
+  [pg-conn-string]
+  (if (nil? pg-conn-string)
+    {:ok false :error "No PGCONNSTRING configured (via environment or Infisical)"}
+    (try
+      (let [ds (jdbc/get-datasource pg-conn-string)]
+        (jdbc/execute! ds ["SELECT 1"])
+        {:ok true})
+      (catch Exception e
+        {:ok false :error (.getMessage e)}))))
+
 (defn fetch-latest-manifest
   "Action (Req 7.1, Mode 1). Queries PostgreSQL for the most recent
    manifest record whose snapshot belongs to `dataset`, parsed back into a
