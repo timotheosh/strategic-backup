@@ -44,6 +44,27 @@
        :cmd  ""}))
 
 ;; ---------------------------------------------------------------------------
+;; await-db-persist! — bounded wait for the async DB persist future before
+;; -main exits, so System/exit can't silently kill it mid-flight without
+;; ever logging a failure (see run-backup!'s step 8/13 for the full story)
+;; ---------------------------------------------------------------------------
+
+(deftest await-db-persist-returns-promptly-when-future-already-done
+  (testing "does not wait for the full timeout when the future has already completed"
+    (let [f (future :done)]
+      @f ;; force realization before timing starts
+      (let [start (System/currentTimeMillis)]
+        (core/await-db-persist! f 5000)
+        (is (< (- (System/currentTimeMillis) start) 1000))))))
+
+(deftest await-db-persist-never-blocks-past-the-timeout
+  (testing "returns at approximately the timeout boundary, not waiting for a slow/hung future"
+    (let [f     (future (Thread/sleep 5000) :never-gets-here)
+          start (System/currentTimeMillis)]
+      (core/await-db-persist! f 100)
+      (is (< (- (System/currentTimeMillis) start) 1000)))))
+
+;; ---------------------------------------------------------------------------
 ;; run-backup! — pipeline structural tests (using with-redefs)
 ;; ---------------------------------------------------------------------------
 
@@ -236,6 +257,49 @@
         (is (every? #(= b2-env %) @captured-envs))
         (finally (delete-dir staging))))))
 
+(deftest backup-does-not-hang-waiting-for-a-slow-db-persist
+  (testing "run-backup! returns promptly even when DB persist would take far longer than the await timeout"
+    (let [staging (make-temp-dir)
+          config  (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
+                      strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
+                      strategic-backup.manifest/write-edn!              (fn [m _]
+                                                                          (str (.getAbsolutePath staging) "/" (:archive-file m)))
+                      strategic-backup.db/persist-manifest!             (fn [_ _] (Thread/sleep 5000) {:ok true})
+                      strategic-backup.upload/rclone-copy!              (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)
+                      core/db-persist-timeout-ms                        100]
+          (let [start (System/currentTimeMillis)]
+            (core/run-backup! config (ok-executor))
+            (is (< (- (System/currentTimeMillis) start) 2000))))
+        (finally (delete-dir staging))))))
+
+;; ---------------------------------------------------------------------------
+;; run-db-test! / run-b2-test! (--db-test / --b2-test CLI flags)
+;; ---------------------------------------------------------------------------
+
+(deftest run-db-test-returns-ok-true-on-success
+  (with-redefs [strategic-backup.db/test-connection! (fn [_] {:ok true})]
+    (is (= {:ok true} (core/run-db-test! base-config)))))
+
+(deftest run-db-test-returns-ok-false-on-failure
+  (with-redefs [strategic-backup.db/test-connection! (fn [_] {:ok false :error "boom"})]
+    (is (= {:ok false :error "boom"} (core/run-db-test! base-config)))))
+
+(deftest run-b2-test-returns-ok-true-on-success
+  (with-redefs [strategic-backup.upload/test-connection! (fn [_ _ _] {:ok true})]
+    (is (= {:ok true} (core/run-b2-test! base-config (ok-executor))))))
+
+(deftest run-b2-test-returns-ok-false-on-failure
+  (with-redefs [strategic-backup.upload/test-connection! (fn [_ _ _] {:ok false :error "boom"})]
+    (is (= {:ok false :error "boom"} (core/run-b2-test! base-config (ok-executor))))))
+
 ;; ---------------------------------------------------------------------------
 ;; -main exit code tests
 ;; ---------------------------------------------------------------------------
@@ -267,5 +331,65 @@
                       (fn [_ _] (throw (ex-info "snapshot failed" {:stage :snapshot})))
                       core/exit! (fn [code] (reset! exit-code code))]
           (core/-main "backup"))
+        (is (= 1 @exit-code))
+        (finally (delete-dir staging))))))
+
+(deftest main-db-test-exits-zero-on-success
+  (testing "-main --db-test exits with code 0 when the DB connection test succeeds"
+    (let [exit-code (atom nil)
+          staging   (make-temp-dir)
+          config    (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.config/load-config     (fn [_] config)
+                      strategic-backup.config/validate-config (fn [c] c)
+                      strategic-backup.config/resolve-secrets (fn [c] c)
+                      strategic-backup.db/test-connection!    (fn [_] {:ok true})
+                      core/exit!                              (fn [code] (reset! exit-code code))]
+          (core/-main "--db-test"))
+        (is (= 0 @exit-code))
+        (finally (delete-dir staging))))))
+
+(deftest main-db-test-exits-one-on-failure
+  (testing "-main --db-test exits with code 1 when the DB connection test fails"
+    (let [exit-code (atom nil)
+          staging   (make-temp-dir)
+          config    (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.config/load-config     (fn [_] config)
+                      strategic-backup.config/validate-config (fn [c] c)
+                      strategic-backup.config/resolve-secrets (fn [c] c)
+                      strategic-backup.db/test-connection!    (fn [_] {:ok false :error "boom"})
+                      core/exit!                              (fn [code] (reset! exit-code code))]
+          (core/-main "--db-test"))
+        (is (= 1 @exit-code))
+        (finally (delete-dir staging))))))
+
+(deftest main-b2-test-exits-zero-on-success
+  (testing "-main --b2-test exits with code 0 when the B2 connection test succeeds"
+    (let [exit-code (atom nil)
+          staging   (make-temp-dir)
+          config    (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.config/load-config      (fn [_] config)
+                      strategic-backup.config/validate-config  (fn [c] c)
+                      strategic-backup.config/resolve-secrets  (fn [c] c)
+                      strategic-backup.upload/test-connection! (fn [_ _ _] {:ok true})
+                      core/exit!                               (fn [code] (reset! exit-code code))]
+          (core/-main "--b2-test"))
+        (is (= 0 @exit-code))
+        (finally (delete-dir staging))))))
+
+(deftest main-b2-test-exits-one-on-failure
+  (testing "-main --b2-test exits with code 1 when the B2 connection test fails"
+    (let [exit-code (atom nil)
+          staging   (make-temp-dir)
+          config    (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.config/load-config      (fn [_] config)
+                      strategic-backup.config/validate-config  (fn [c] c)
+                      strategic-backup.config/resolve-secrets  (fn [c] c)
+                      strategic-backup.upload/test-connection! (fn [_ _ _] {:ok false :error "boom"})
+                      core/exit!                               (fn [code] (reset! exit-code code))]
+          (core/-main "--b2-test"))
         (is (= 1 @exit-code))
         (finally (delete-dir staging))))))

@@ -96,6 +96,14 @@
 
     (log/info "Starting restore test" {:mode mode})
 
+    ;; Defensive pre-cleanup: zfs receive fails outright if the destination
+    ;; already exists, so destroy any stale test-dataset left behind by an
+    ;; abnormally-terminated previous run (kill -9, OOM, crash, power loss —
+    ;; anything that skips the finally block below) before attempting a
+    ;; receive. destroy-dataset! is idempotent/never throws, so this is safe
+    ;; to run unconditionally even when there's nothing to clean up.
+    (snapshot/destroy-dataset! executor test-dataset)
+
     (let [archive-fname (if (= mode 3)
                           (latest-archive (upload/list-remote executor b2-remote b2-rclone-env))
                           (:archive-file manifest))]
