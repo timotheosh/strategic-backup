@@ -69,13 +69,17 @@ logged at once.
 Secrets are never stored in the config file. By default they're read
 from environment variables:
 
-| Variable                 | Required? | Purpose                                              |
-|---------------------------+-----------+-------------------------------------------------------|
-| ~BACKUP_ENCRYPTION_KEY~   | Yes       | ~openssl enc~ passphrase (via ~-pass env:~, never argv) |
-| ~RCLONE_CONFIG~           | Yes\*     | Path to an rclone config file with a B2 remote        |
-| ~PGCONNSTRING~            | No        | Postgres/CockroachDB connection string (JDBC-style)   |
+| Variable                     | Required? | Purpose                                              |
+|-------------------------------+-----------+-------------------------------------------------------|
+| ~BACKUP_ENCRYPTION_KEY~       | Yes       | ~openssl enc~ passphrase (via ~-pass env:~, never argv) |
+| ~RCLONE_CONFIG~               | Yes\*     | Path to an rclone config file with a B2 remote        |
+| ~PGCONNSTRING~                | No        | Postgres/CockroachDB connection string (JDBC-style)   |
+| ~ZFS_ENCRYPTION_PASSPHRASE~   | No\*\*    | Passphrase to ~zfs load-key~ a ZFS-encrypted ~:test-dataset~ during ~restore-test~ |
 
 \* Not required if using Infisical mode for B2 credentials — see below.
+
+\*\* Only needed if ~:dataset~ is itself ZFS-encrypted (~encryption~ property
+not ~off~) — see [[#zfs-encryption-passphrase][ZFS encryption passphrase]] below.
 
 **** PGCONNSTRING format
 :PROPERTIES:
@@ -101,6 +105,35 @@ jdbc:postgresql://myuser:mypassword@localhost:26257/backups?sslmode=verify-full&
 This is entirely optional — see [[#database-setup][Database setup]] below for what it's
 for, and omit ~PGCONNSTRING~ entirely (or its Infisical equivalent) if you
 don't want manifest persistence at all.
+
+**** ZFS encryption passphrase (restore-test only)
+:PROPERTIES:
+:CUSTOM_ID: zfs-encryption-passphrase
+:END:
+If ~:dataset~ already has native ZFS encryption enabled (~zfs get
+encryption <dataset>~ reports anything other than ~off~), backups skip
+the ~openssl~ encryption stage entirely — the raw ~zfs send -w~ stream is
+already encrypted, so there's no double encryption. That's transparent
+for ~backup~, but ~restore-test~ has to unlock the *received* test
+dataset before it can read files back off it to verify their checksums.
+If the source dataset's ~keylocation~ is ~prompt~ (the normal case for an
+interactively-entered passphrase), there's nothing to prompt in an
+unattended cron job — that's what this secret is for.
+
+Set ~ZFS_ENCRYPTION_PASSPHRASE~ (env var or Infisical, same precedence as
+every other secret here) to the passphrase for ~:dataset~. It's piped to
+~zfs load-key~'s stdin — never passed as a command-line argument or
+written to a file, so it never appears in a process listing, mirroring
+how ~BACKUP_ENCRYPTION_KEY~ is kept out of ~openssl~'s argv.
+
+This is only ever consulted by ~restore-test~, and only for a dataset
+that turns out to be ZFS-encrypted with verification actually running
+(i.e. not ~--skip-verify~/Mode 3). Unlike ~PGCONNSTRING~, a missing or
+wrong passphrase in that situation *aborts restore-test loudly* — the
+whole point of restore-test is verifying a real restore actually works,
+so silently skipping verification because the key couldn't be loaded
+would defeat that. If your dataset isn't ZFS-encrypted, this secret is
+never touched and can be omitted entirely.
 
 **** Optional: Infisical for database and B2 credentials
 :PROPERTIES:
@@ -128,10 +161,14 @@ Infisical's own client credentials (~INFISICAL_CLIENT_ID~ /
 [[https://clojars.org/io.github.timotheosh/clj-infisical][clj-infisical]] itself and are never read from ~config.edn~.
 
 Store these secrets in the Infisical project when using this mode:
-~PGCONNSTRING~, ~B2_KEY_ID~, ~B2_APPLICATION_KEY~. A missing or failed
-~PGCONNSTRING~ fetch just disables database persistence (logged, never
-fatal — the database is always optional). A missing or failed B2 fetch
-*does* abort the run, since the backup can't reach the remote without it.
+~PGCONNSTRING~, ~B2_KEY_ID~, ~B2_APPLICATION_KEY~, and (only if
+~:dataset~ is ZFS-encrypted) ~ZFS_ENCRYPTION_PASSPHRASE~. A missing or
+failed ~PGCONNSTRING~ fetch just disables database persistence (logged,
+never fatal — the database is always optional). A missing or failed B2
+fetch *does* abort the run, since the backup can't reach the remote
+without it. ~ZFS_ENCRYPTION_PASSPHRASE~ sits in between: it's silently
+unused for non-encrypted datasets, but see [[#zfs-encryption-passphrase][ZFS encryption passphrase]]
+above for when it *does* abort — loudly — for encrypted ones.
 
 *** Database setup (optional)
 :PROPERTIES:

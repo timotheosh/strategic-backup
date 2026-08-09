@@ -132,6 +132,44 @@
            (snapshot/receive-stream! (ok-executor) "tank/restore-test")))))
 
 ;; ---------------------------------------------------------------------------
+;; load-key! (uses executor)
+;; ---------------------------------------------------------------------------
+
+(deftest load-key-returns-dataset-on-success
+  (testing "returns the dataset name on success"
+    (is (= "tank/restore-test"
+           (snapshot/load-key! (ok-executor) "tank/restore-test" "s3kr3t")))))
+
+(deftest load-key-throws-ex-info-on-non-zero-exit
+  (testing "throws ex-info with :stage :restore on non-zero exit (e.g. wrong passphrase)"
+    (try
+      (snapshot/load-key! (fail-executor) "tank/restore-test" "wrong-pass")
+      (is false "expected ex-info to be thrown")
+      (catch clojure.lang.ExceptionInfo e
+        (is (= :restore (:stage (ex-data e))))))))
+
+(deftest load-key-invokes-zfs-load-key-with-exact-dataset
+  (testing "calls zfs load-key with the exact dataset name"
+    (let [dataset  "tank/restore-test"
+          cmd      (str "zfs load-key " dataset)
+          executor (shell/make-mock-executor {cmd {:exit 0 :out "" :err "" :cmd cmd}})]
+      (is (= dataset (snapshot/load-key! executor dataset "s3kr3t"))))))
+
+(deftest load-key-passes-passphrase-via-stdin-not-argv
+  (testing "the passphrase is forwarded as :in in shell/run-cmd's opts, never
+            appended to the args vector — so it never appears in a process
+            listing"
+    (let [captured-args (atom nil)
+          captured-opts (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ args opts]
+                                    (reset! captured-args args)
+                                    (reset! captured-opts opts)
+                                    {:exit 0 :out "" :err "" :cmd ""})]
+        (snapshot/load-key! nil "tank/restore-test" "s3kr3t")
+        (is (not-any? #(clojure.string/includes? % "s3kr3t") @captured-args))
+        (is (= {:in "s3kr3t"} @captured-opts))))))
+
+;; ---------------------------------------------------------------------------
 ;; destroy-dataset! (uses executor)
 ;; ---------------------------------------------------------------------------
 

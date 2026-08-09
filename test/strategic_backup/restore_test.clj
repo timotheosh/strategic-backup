@@ -73,6 +73,55 @@
   (is (false? (restore/requires-openssl-decryption? 3 nil "x.zfs.gz"))))
 
 ;; ---------------------------------------------------------------------------
+;; needs-zfs-key? (ZFS encryption passphrase — only needed when verification
+;; is about to run against a ZFS-natively-encrypted dataset)
+;; ---------------------------------------------------------------------------
+
+(deftest needs-zfs-key-true-when-verifying-a-zfs-encrypted-dataset
+  (is (true? (restore/needs-zfs-key? 1 false)))
+  (is (true? (restore/needs-zfs-key? 2 false))))
+
+(deftest needs-zfs-key-false-when-openssl-encrypted-instead
+  (is (false? (restore/needs-zfs-key? 1 true)))
+  (is (false? (restore/needs-zfs-key? 2 true))))
+
+(deftest needs-zfs-key-false-in-mode-3-regardless-of-decrypt
+  (testing "mode 3 skips verification entirely, so the key is never needed"
+    (is (false? (restore/needs-zfs-key? 3 false)))
+    (is (false? (restore/needs-zfs-key? 3 true)))))
+
+;; ---------------------------------------------------------------------------
+;; ensure-zfs-key-loaded!
+;; ---------------------------------------------------------------------------
+
+(deftest ensure-zfs-key-loaded-no-op-when-not-needed
+  (testing "does not call snapshot/load-key! when needs-key? is false"
+    (let [called (atom false)]
+      (with-redefs [strategic-backup.snapshot/load-key! (fn [_ _ _] (reset! called true))]
+        (restore/ensure-zfs-key-loaded! (ok-executor) "tank/restore-test" false nil)
+        (is (false? @called))))))
+
+(deftest ensure-zfs-key-loaded-throws-when-needed-and-passphrase-missing
+  (testing "throws ex-info :stage :restore immediately, without ever calling
+            snapshot/load-key!, when the passphrase isn't configured"
+    (let [called (atom false)]
+      (with-redefs [strategic-backup.snapshot/load-key! (fn [_ _ _] (reset! called true))]
+        (try
+          (restore/ensure-zfs-key-loaded! (ok-executor) "tank/restore-test" true nil)
+          (is false "expected ex-info to be thrown")
+          (catch clojure.lang.ExceptionInfo e
+            (is (= :restore (:stage (ex-data e))))))
+        (is (false? @called))))))
+
+(deftest ensure-zfs-key-loaded-calls-load-key-when-needed-and-passphrase-present
+  (testing "calls snapshot/load-key! with the exact dataset and passphrase"
+    (let [captured (atom nil)]
+      (with-redefs [strategic-backup.snapshot/load-key!
+                    (fn [_ dataset passphrase] (reset! captured [dataset passphrase]) dataset)]
+        (restore/ensure-zfs-key-loaded! (ok-executor) "tank/restore-test" true "s3kr3t")
+        (is (= ["tank/restore-test" "s3kr3t"] @captured))))))
+
+;; ---------------------------------------------------------------------------
 ;; latest-archive
 ;; ---------------------------------------------------------------------------
 
@@ -263,6 +312,84 @@
             (catch clojure.lang.ExceptionInfo e
               (is (= :restore (:stage (ex-data e)))))))
         (is (true? @destroyed))
+        (finally (delete-dir staging))))))
+
+;; ---------------------------------------------------------------------------
+;; run-restore-test! — ZFS encryption passphrase (zfs load-key) integration
+;; ---------------------------------------------------------------------------
+
+(def ^:private encrypted-manifest
+  (assoc sample-manifest :zfs-encrypted true :archive-file "tank-syncthing-2026-05-11T020000.zfs.gz"))
+
+(deftest run-restore-test-loads-zfs-key-before-verification-for-encrypted-dataset
+  (testing "when the dataset was ZFS-encrypted at backup time, the key is loaded
+            (via snapshot/load-key!) after zfs receive and before file-checksum
+            verification"
+    (let [call-log (atom [])
+          staging  (make-temp-dir)
+          config   (-> base-config
+                       (assoc :staging-dir (.getAbsolutePath staging))
+                       (assoc-in [:secrets :zfs-encryption-passphrase] "s3kr3t"))]
+      (try
+        (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] encrypted-manifest)
+                      strategic-backup.manifest/latest-local-edn        (fn [_] nil)
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
+                                                                          (spit (str dir "/" (:archive-file encrypted-manifest)) "data")
+                                                                          nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
+                      strategic-backup.restore/run-restore-pipeline!    (fn [_ _] (swap! call-log conj :pipeline) nil)
+                      strategic-backup.snapshot/load-key!               (fn [_ dataset _] (swap! call-log conj :load-key) dataset)
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] (swap! call-log conj :verify) {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (swap! call-log conj :destroy) nil)]
+          (restore/run-restore-test! config (ok-executor) false))
+        (is (= [:destroy :pipeline :load-key :verify :destroy] @call-log))
+        (finally (delete-dir staging))))))
+
+(deftest run-restore-test-aborts-loudly-when-encrypted-and-passphrase-missing
+  (testing "throws before verification and still cleans up when the dataset is
+            ZFS-encrypted but no passphrase is configured"
+    (let [destroyed     (atom false)
+          verify-called (atom false)
+          staging       (make-temp-dir)
+          config        (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] encrypted-manifest)
+                      strategic-backup.manifest/latest-local-edn        (fn [_] nil)
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
+                                                                          (spit (str dir "/" (:archive-file encrypted-manifest)) "data")
+                                                                          nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
+                      strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] (reset! verify-called true) {:ok true})
+                      strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (reset! destroyed true) nil)]
+          (try
+            (restore/run-restore-test! config (ok-executor) false)
+            (is false "expected ex-info to be thrown")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :restore (:stage (ex-data e)))))))
+        (is (false? @verify-called))
+        (is (true? @destroyed))
+        (finally (delete-dir staging))))))
+
+(deftest run-restore-test-skips-key-loading-for-openssl-encrypted-dataset
+  (testing "no zfs load-key attempt for a dataset that used openssl encryption
+            instead of native ZFS encryption, even with no passphrase configured"
+    (let [load-key-called (atom false)
+          staging         (make-temp-dir)
+          config          (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.db/fetch-latest-manifest         (fn [_ _] sample-manifest)
+                      strategic-backup.manifest/latest-local-edn        (fn [_] nil)
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
+                                                                          (spit (str dir "/" (:archive-file sample-manifest)) "data")
+                                                                          nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
+                      strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
+                      strategic-backup.snapshot/load-key!               (fn [_ _ _] (reset! load-key-called true))
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.snapshot/destroy-dataset!        (fn [_ _] nil)]
+          (restore/run-restore-test! config (ok-executor) false))
+        (is (false? @load-key-called))
         (finally (delete-dir staging))))))
 
 (deftest run-restore-test-throws-when-no-archive-available

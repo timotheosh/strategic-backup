@@ -24,8 +24,13 @@
      Parameters:
        cmd  — command name string (e.g. \"zfs\")
        args — vector of argument strings (e.g. [\"snapshot\" \"tank/data@backup\"])
-       opts — options map; currently supports :env (a map of env-var-name → value
-              strings to merge into the process environment)
+       opts — options map; currently supports:
+                :env (a map of env-var-name → value strings to merge into
+                      the process environment)
+                :in  (a string piped to the subprocess's stdin — the safe
+                      way to hand a command a secret it reads interactively,
+                      e.g. `zfs load-key`, without ever putting it in argv
+                      or a file)
 
      Returns {:exit N :out \"...\" :err \"...\" :cmd \"<cmd> <args...>\"}")
 
@@ -48,8 +53,12 @@
 
   (run-cmd [_this cmd args opts]
     (let [env-map  (get opts :env {})
+          in-str   (get opts :in)
           ;; clojure.java.shell/sh accepts :env as a map of String→String
-          sh-args  (concat [cmd] args (when (seq env-map) [:env env-map]))
+          ;; and :in as a string piped to the subprocess's stdin
+          sh-args  (concat [cmd] args
+                           (when (seq env-map) [:env env-map])
+                           (when (some? in-str) [:in in-str]))
           result   (apply sh/sh sh-args)
           cmd-str  (str/join " " (cons cmd args))]
       (assoc result :cmd cmd-str)))

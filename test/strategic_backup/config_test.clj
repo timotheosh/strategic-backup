@@ -256,6 +256,46 @@
           (is (= :secrets (:stage (ex-data e)))))))))
 
 ;; ---------------------------------------------------------------------------
+;; resolve-zfs-passphrase! (ZFS encryption passphrase, used to zfs load-key
+;; a received test-dataset during restore-test verification)
+;; NEVER throws AND never logs — unlike PGCONNSTRING, this secret is purely
+;; situational (only ZFS-encrypted datasets need it); restore.clj is
+;; responsible for failing loudly at the point of actual use.
+;; ---------------------------------------------------------------------------
+
+(deftest resolve-zfs-passphrase-legacy-env-wins-without-calling-infisical
+  (testing "returns the env value directly, never calls infisical/fetch-secret!"
+    (let [fetch-called (atom false)]
+      (with-redefs [infisical/fetch-secret! (fn [_ _] (reset! fetch-called true) "should-not-be-used")]
+        (let [result (config/resolve-zfs-passphrase!
+                      {"ZFS_ENCRYPTION_PASSPHRASE" "legacy-pass"}
+                      {:project-id "proj-123"})]
+          (is (= "legacy-pass" result))
+          (is (false? @fetch-called)))))))
+
+(deftest resolve-zfs-passphrase-fetches-from-infisical-when-env-absent
+  (testing "calls infisical/fetch-secret! with ZFS_ENCRYPTION_PASSPHRASE when the legacy env var is absent"
+    (with-redefs [infisical/fetch-secret!
+                  (fn [infisical-config secret-name]
+                    (is (= "proj-123" (:project-id infisical-config)))
+                    (is (= "ZFS_ENCRYPTION_PASSPHRASE" secret-name))
+                    "pass-from-infisical")]
+      (let [result (config/resolve-zfs-passphrase! {} {:project-id "proj-123"})]
+        (is (= "pass-from-infisical" result))))))
+
+(deftest resolve-zfs-passphrase-nil-when-absent-and-not-infisical-mode
+  (testing "returns nil without throwing when env absent and not in Infisical mode"
+    (is (nil? (config/resolve-zfs-passphrase! {} nil)))))
+
+(deftest resolve-zfs-passphrase-nil-when-infisical-fetch-fails
+  (testing "returns nil without throwing when the Infisical fetch itself fails, for any reason"
+    (with-redefs [infisical/fetch-secret!
+                  (fn [_ _] (throw (ex-info "Infisical secret fetch failed for ZFS_ENCRYPTION_PASSPHRASE"
+                                            {:stage :secrets :secret-name "ZFS_ENCRYPTION_PASSPHRASE"
+                                             :infisical-error :clj-infisical/secret-not-found})))]
+      (is (nil? (config/resolve-zfs-passphrase! {} {:project-id "proj-123"}))))))
+
+;; ---------------------------------------------------------------------------
 ;; resolve-secrets tests
 ;; ---------------------------------------------------------------------------
 
@@ -331,6 +371,29 @@
       (let [result (config/resolve-secrets valid-config)]
         (is (nil? (get-in result [:secrets :pg-conn-string])))))))
 
+(deftest resolve-secrets-legacy-mode-attaches-zfs-passphrase-from-env
+  (testing "legacy mode reads ZFS_ENCRYPTION_PASSPHRASE straight from the environment"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k]
+                    (case k
+                      "BACKUP_ENCRYPTION_KEY"       "enc-key"
+                      "RCLONE_CONFIG"               "/etc/rclone.conf"
+                      "ZFS_ENCRYPTION_PASSPHRASE"   "legacy-pass"
+                      nil))]
+      (let [result (config/resolve-secrets valid-config)]
+        (is (= "legacy-pass" (get-in result [:secrets :zfs-encryption-passphrase])))))))
+
+(deftest resolve-secrets-legacy-mode-allows-missing-zfs-passphrase
+  (testing "does not throw when ZFS_ENCRYPTION_PASSPHRASE is absent — nil, no warning required"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k]
+                    (case k
+                      "BACKUP_ENCRYPTION_KEY" "enc-key"
+                      "RCLONE_CONFIG"         "/etc/rclone.conf"
+                      nil))]
+      (let [result (config/resolve-secrets valid-config)]
+        (is (nil? (get-in result [:secrets :zfs-encryption-passphrase])))))))
+
 ;; ---------------------------------------------------------------------------
 ;; resolve-secrets: Infisical mode (infisical-secrets spec, Requirements 2, 3, 5)
 ;; ---------------------------------------------------------------------------
@@ -339,11 +402,15 @@
   (assoc valid-config :secret-store :infisical :infisical {:project-id "proj-123"}))
 
 (deftest resolve-secrets-legacy-only-mode-unchanged-shape
-  (testing "when :secret-store is absent, :secrets shape is exactly as before this feature existed (Requirement 5.1, 5.2)"
+  (testing "when :secret-store is absent, :secrets shape is exactly as before the
+            Infisical feature existed, plus :zfs-encryption-passphrase — which,
+            like PGCONNSTRING, is resolvable from a plain env var regardless of
+            Infisical involvement (Requirement 5.1, 5.2; Requirement 6)"
     (with-redefs [strategic-backup.config/getenv
                   (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" "RCLONE_CONFIG" "/etc/rclone.conf" nil))]
       (let [result (config/resolve-secrets valid-config)]
-        (is (= #{:encryption-key :rclone-config :pg-conn-string} (set (keys (:secrets result)))))))))
+        (is (= #{:encryption-key :rclone-config :pg-conn-string :zfs-encryption-passphrase}
+               (set (keys (:secrets result)))))))))
 
 (deftest resolve-secrets-infisical-mode-attaches-pg-conn-string-and-b2-rclone-env
   (testing "adds :pg-conn-string (via Infisical) and :b2-rclone-env when both legacy env vars are absent"
@@ -354,7 +421,8 @@
                     (case secret-name
                       "PGCONNSTRING"       "postgres://from-infisical"
                       "B2_KEY_ID"          "key-id"
-                      "B2_APPLICATION_KEY" "app-key"))]
+                      "B2_APPLICATION_KEY" "app-key"
+                      nil))]
       (let [result (config/resolve-secrets infisical-config)]
         (is (= "postgres://from-infisical" (get-in result [:secrets :pg-conn-string])))
         (is (= {"RCLONE_CONFIG_B2_TYPE"    "b2"
@@ -395,6 +463,32 @@
         (is false "expected ex-info to be thrown")
         (catch clojure.lang.ExceptionInfo e
           (is (= :secrets (:stage (ex-data e)))))))))
+
+(deftest resolve-secrets-infisical-mode-attaches-zfs-passphrase-via-infisical
+  (testing "adds :zfs-encryption-passphrase via Infisical when the legacy env var is absent"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" nil))
+                  infisical/fetch-secret!
+                  (fn [_ secret-name]
+                    (case secret-name
+                      "PGCONNSTRING"               "postgres://from-infisical"
+                      "B2_KEY_ID"                   "key-id"
+                      "B2_APPLICATION_KEY"          "app-key"
+                      "ZFS_ENCRYPTION_PASSPHRASE"   "pass-from-infisical"))]
+      (let [result (config/resolve-secrets infisical-config)]
+        (is (= "pass-from-infisical" (get-in result [:secrets :zfs-encryption-passphrase])))))))
+
+(deftest resolve-secrets-infisical-mode-zfs-passphrase-failure-does-not-abort
+  (testing "an Infisical ZFS_ENCRYPTION_PASSPHRASE fetch failure does not abort — nil, same as PGCONNSTRING"
+    (with-redefs [strategic-backup.config/getenv
+                  (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" "RCLONE_CONFIG" "/etc/rclone.conf" nil))
+                  infisical/fetch-secret!
+                  (fn [_ secret-name]
+                    (case secret-name
+                      "PGCONNSTRING" "postgres://from-infisical"
+                      (throw (ex-info "not found" {:type :clj-infisical/secret-not-found}))))]
+      (let [result (config/resolve-secrets infisical-config)]
+        (is (nil? (get-in result [:secrets :zfs-encryption-passphrase])))))))
 
 (deftest resolve-secrets-infisical-mode-still-requires-encryption-key
   (testing "BACKUP_ENCRYPTION_KEY is still required in Infisical mode — untouched, out of scope (Requirement 5.1)"
