@@ -80,3 +80,28 @@
       (let [result (db/test-connection! "postgres://localhost/db")]
         (is (false? (:ok result)))
         (is (= "connection refused" (:error result)))))))
+
+(deftest test-connection-includes-root-cause-when-present
+  (testing "the :error string includes the root cause's message when the top-level
+            exception (e.g. pgjdbc's generic \"The connection attempt failed.\")
+            wraps a more specific underlying failure — otherwise the real reason
+            (DNS, refused, timeout, TLS) is silently discarded"
+    (with-redefs [jdbc/get-datasource (fn [_] :fake-datasource)
+                  jdbc/execute!       (fn [_ _]
+                                       (throw (Exception. "The connection attempt failed."
+                                                           (java.net.ConnectException. "Connection refused"))))]
+      (let [result (db/test-connection! "postgres://localhost/db")]
+        (is (false? (:ok result)))
+        (is (str/includes? (:error result) "The connection attempt failed."))
+        (is (str/includes? (:error result) "Connection refused"))))))
+
+(deftest test-connection-walks-to-the-true-root-cause
+  (testing "walks multiple levels of cause, not just the first, to find the true root"
+    (with-redefs [jdbc/get-datasource (fn [_] :fake-datasource)
+                  jdbc/execute!       (fn [_ _]
+                                       (throw (Exception. "outer"
+                                                           (Exception. "middle"
+                                                                       (java.net.UnknownHostException. "kms.selfdidactic.lan")))))]
+      (let [result (db/test-connection! "postgres://localhost/db")]
+        (is (str/includes? (:error result) "outer"))
+        (is (str/includes? (:error result) "kms.selfdidactic.lan"))))))

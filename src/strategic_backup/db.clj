@@ -51,6 +51,29 @@
                       (manifest->json manifest)])
       {:ok true})))
 
+(defn- root-cause
+  "Calculation. Walks `.getCause` until there is no further cause,
+   returning `e` itself when it has none."
+  [e]
+  (loop [current e]
+    (if-let [cause (ex-cause current)]
+      (recur cause)
+      current)))
+
+(defn- exception-detail
+  "Calculation. `e`'s own message, plus the root cause's message when it
+   differs — pgjdbc wraps low-level connection failures (DNS, connection
+   refused, timeout, TLS) in a generic top-level message (e.g. \"The
+   connection attempt failed.\") whose own .getMessage hides the actually
+   useful detail, which lives on the root cause instead."
+  [e]
+  (let [top      (.getMessage e)
+        root     (root-cause e)
+        root-msg (when-not (identical? root e) (.getMessage root))]
+    (if (and root-msg (not= root-msg top))
+      (str top " — caused by: " root-msg)
+      top)))
+
 (defn test-connection!
   "Action (--db-test CLI flag). Attempts to connect to `pg-conn-string` and
    run a trivial query (`SELECT 1`).
@@ -68,7 +91,7 @@
         (jdbc/execute! ds ["SELECT 1"])
         {:ok true})
       (catch Exception e
-        {:ok false :error (.getMessage e)}))))
+        {:ok false :error (exception-detail e)}))))
 
 (defn fetch-latest-manifest
   "Action (Req 7.1, Mode 1). Queries PostgreSQL for the most recent

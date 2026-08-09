@@ -185,7 +185,7 @@
         (infisical/fetch-secret! infisical-config "PGCONNSTRING")
         (catch clojure.lang.ExceptionInfo e
           (log/warn "Infisical fetch for PGCONNSTRING failed — PostgreSQL persistence will be skipped:"
-                    (.getMessage e))
+                    {:message (.getMessage e) :reason (:infisical-error (ex-data e))})
           nil))
 
       :missing
