@@ -89,7 +89,7 @@
                       strategic-backup.upload/list-remote               (fn [_ _ _] [])
                       strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
-          (core/run-backup! config (ok-executor)))
+          (core/run-backup! config (ok-executor) false))
         (is (= 1 (count @upload-calls)))
         ;; The remote path should not be a sync call — we verify structurally
         ;; that rclone-copy! was called (the implementation hardcodes "rclone copy")
@@ -116,7 +116,7 @@
                       strategic-backup.upload/list-remote               (fn [_ _ _] [])
                       strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
-          (core/run-backup! config (ok-executor)))
+          (core/run-backup! config (ok-executor) false))
         ;; The uploaded file must NOT be the EDN manifest
         (is (not (str/ends-with? (or @upload-args "") ".manifest.edn")))
         (finally (delete-dir staging))))))
@@ -143,7 +143,7 @@
                       strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!
                       (fn [_ _] (reset! backup-completed true) 0)]
-          (core/run-backup! config (ok-executor)))
+          (core/run-backup! config (ok-executor) false))
         ;; If we reach here, backup completed despite DB failure
         (is (true? @backup-completed))
         (finally (delete-dir staging))))))
@@ -174,7 +174,7 @@
                       strategic-backup.upload/list-remote               (fn [_ _ _] [])
                       strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
-          (core/run-backup! config (ok-executor)))
+          (core/run-backup! config (ok-executor) false))
         ;; Archive file must be deleted
         (when @fake-archive
           (is (not (.exists (io/file @fake-archive)))))
@@ -202,7 +202,7 @@
                       strategic-backup.upload/list-remote               (fn [_ _ _] [])
                       strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
-          (core/run-backup! config (ok-executor)))
+          (core/run-backup! config (ok-executor) false))
         ;; EDN file must still exist
         (when @edn-path-ref
           (is (.exists (io/file @edn-path-ref))))
@@ -219,7 +219,7 @@
         (with-redefs [strategic-backup.upload/rclone-copy!
                       (fn [_ _ _ _] (reset! upload-called true))]
           (try
-            (core/run-backup! config (ok-executor))
+            (core/run-backup! config (ok-executor) false)
             (is false "expected ex-info to be thrown")
             (catch clojure.lang.ExceptionInfo e
               (is (= :config (:stage (ex-data e))))
@@ -252,7 +252,7 @@
                       strategic-backup.retention/enforce-retention!
                       (fn [_ _ _ _ env] (swap! captured-envs conj env) {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
-          (core/run-backup! config (ok-executor)))
+          (core/run-backup! config (ok-executor) false))
         (is (= 3 (count @captured-envs)))
         (is (every? #(= b2-env %) @captured-envs))
         (finally (delete-dir staging))))))
@@ -277,7 +277,7 @@
                       strategic-backup.manifest/compute-file-checksums (fn [_ _] {})
                       strategic-backup.pipeline/run-pipeline!          (fn [_ _] (reset! pipeline-called true) nil)]
           (try
-            (core/run-backup! config (ok-executor))
+            (core/run-backup! config (ok-executor) false)
             (is false "expected ex-info to be thrown")
             (catch clojure.lang.ExceptionInfo e
               (is (= :config (:stage (ex-data e)))))))
@@ -304,7 +304,40 @@
                       strategic-backup.upload/list-remote               (fn [_ _ _] [])
                       strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
-          (is (nil? (core/run-backup! config (ok-executor)))))
+          (is (nil? (core/run-backup! config (ok-executor) false))))
+        (finally (delete-dir staging))))))
+
+;; ---------------------------------------------------------------------------
+;; run-backup! — per-stage timing (pipeline-timing spec)
+;; ---------------------------------------------------------------------------
+
+(deftest run-backup-times-every-major-stage
+  (testing "wraps every major stage in timing/time-stage! with the expected keyword,
+            in order — :db-persist runs on a separate thread via the async future,
+            so its position isn't deterministic; only that it fires is asserted"
+    (let [stages  (atom [])
+          staging (make-temp-dir)
+          config  (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.timing/time-stage!
+                      (fn [stage thunk] (swap! stages conj stage) (thunk))
+                      strategic-backup.snapshot/create-snapshot!       (fn [_ _] nil)
+                      strategic-backup.snapshot/zfs-encrypted?          (fn [_ _] false)
+                      strategic-backup.manifest/compute-file-checksums  (fn [_ _] {})
+                      strategic-backup.pipeline/run-pipeline!           (fn [_ _] nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc")
+                      strategic-backup.manifest/write-edn!              (fn [m _]
+                                                                          (str (.getAbsolutePath staging) "/" (:archive-file m)))
+                      strategic-backup.db/persist-manifest!             (fn [_ _] {:ok true})
+                      strategic-backup.upload/rclone-copy!              (fn [_ _ _ _] nil)
+                      strategic-backup.upload/list-remote               (fn [_ _ _] [])
+                      strategic-backup.retention/enforce-retention!     (fn [_ _ _ _ _] {:deleted [] :failed []})
+                      strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)]
+          (core/run-backup! config (ok-executor) false))
+        (is (= [:snapshot-create :file-checksums :send-pipeline :stream-checksum
+                :manifest-write :b2-upload :retention-enforcement :local-cleanup]
+               (remove #{:db-persist} @stages)))
+        (is (some #{:db-persist} @stages))
         (finally (delete-dir staging))))))
 
 ;; ---------------------------------------------------------------------------
@@ -324,7 +357,7 @@
       (try
         (with-redefs [strategic-backup.snapshot/create-snapshot! (fn [_ _] (reset! snapshot-called true) nil)]
           (try
-            (core/run-backup! config (ok-executor))
+            (core/run-backup! config (ok-executor) false)
             (is false "expected ex-info to be thrown")
             (catch clojure.lang.ExceptionInfo e
               (is (= :secrets (:stage (ex-data e)))))))
@@ -350,7 +383,7 @@
                       strategic-backup.manifest/prune-local-edns!       (fn [_ _] 0)
                       core/db-persist-timeout-ms                        100]
           (let [start (System/currentTimeMillis)]
-            (core/run-backup! config (ok-executor))
+            (core/run-backup! config (ok-executor) false)
             (is (< (- (System/currentTimeMillis) start) 2000))))
         (finally (delete-dir staging))))))
 
@@ -375,6 +408,105 @@
     (is (= {:ok false :error "boom"} (core/run-b2-test! base-config (ok-executor))))))
 
 ;; ---------------------------------------------------------------------------
+;; throughput-files-per-sec (Calc)
+;; ---------------------------------------------------------------------------
+
+(deftest throughput-files-per-sec-computes-rate
+  (is (= 100.0 (core/throughput-files-per-sec 100 1000))))
+
+(deftest throughput-files-per-sec-zero-elapsed-returns-zero
+  (testing "guards divide-by-zero for a pathologically fast/empty run"
+    (is (= 0.0 (core/throughput-files-per-sec 5 0)))))
+
+;; ---------------------------------------------------------------------------
+;; run-checksums! (--checksums CLI flag)
+;; ---------------------------------------------------------------------------
+
+(deftest run-checksums-returns-ok-true-with-file-count
+  (with-redefs [strategic-backup.manifest/compute-file-checksums
+                (fn [_ _] {"./a.txt" "sha256:aaa" "./b.txt" "sha256:bbb"})]
+    (let [result (core/run-checksums! base-config false)]
+      (is (true? (:ok result)))
+      (is (= 2 (:file-count result)))
+      (is (contains? result :elapsed-ms)))))
+
+(deftest run-checksums-returns-ok-false-on-failure
+  (with-redefs [strategic-backup.manifest/compute-file-checksums
+                (fn [_ _] (throw (Exception. "boom")))]
+    (is (= {:ok false :error "boom"} (core/run-checksums! base-config false)))))
+
+(deftest run-checksums-strict-failure-returns-ok-false-not-throw
+  (testing "a --strict-checksums hash failure is caught here and reported as
+            :ok false, same as any other failure mode for this diagnostic command"
+    (with-redefs [strategic-backup.manifest/compute-file-checksums
+                  (fn [_ strict?]
+                    (if strict?
+                      (throw (ex-info "Failed to checksum file" {:stage :checksum}))
+                      {}))]
+      (let [result (core/run-checksums! base-config true)]
+        (is (false? (:ok result)))))))
+
+(deftest run-checksums-does-not-touch-secrets-or-b2
+  (testing "requires only :dataset — never calls ensure-b2-credentials-present! or
+            reads :secrets, so --checksums works even with no B2/DB/encryption
+            secrets configured at all"
+    (let [b2-check-called (atom false)
+          config-no-secrets (dissoc base-config :secrets)]
+      (with-redefs [strategic-backup.manifest/compute-file-checksums (fn [_ _] {})
+                    strategic-backup.upload/ensure-b2-credentials-present!
+                    (fn [_ _] (reset! b2-check-called true))]
+        (let [result (core/run-checksums! config-no-secrets false)]
+          (is (true? (:ok result)))
+          (is (false? @b2-check-called)))))))
+
+;; ---------------------------------------------------------------------------
+;; run-backup! — --strict-checksums
+;; ---------------------------------------------------------------------------
+
+(deftest backup-strict-checksums-aborts-with-stage-checksum-on-hash-failure
+  (testing "a hash failure with strict-checksums? true aborts the run, tagged
+            :stage :checksum, and uploads nothing"
+    (let [upload-called (atom false)
+          staging       (make-temp-dir)
+          config        (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.snapshot/create-snapshot!      (fn [_ _] nil)
+                      strategic-backup.snapshot/zfs-encrypted?         (fn [_ _] false)
+                      strategic-backup.manifest/compute-file-checksums
+                      (fn [_ _] (throw (ex-info "Failed to checksum file" {:stage :checksum})))
+                      strategic-backup.upload/rclone-copy!             (fn [_ _ _ _] (reset! upload-called true))]
+          (try
+            (core/run-backup! config (ok-executor) true)
+            (is false "expected ex-info to be thrown")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :checksum (:stage (ex-data e)))))))
+        (is (false? @upload-called))
+        (finally (delete-dir staging))))))
+
+;; ---------------------------------------------------------------------------
+;; unknown-subcommand-message (Calc) — -main's default `case` branch.
+;; Distinguishes "no subcommand given at all" (args is empty, subcommand is
+;; nil) from an actual unrecognized subcommand string, so the log line
+;; never prints the literal word "nil".
+;; ---------------------------------------------------------------------------
+
+(deftest unknown-subcommand-message-for-nil-does-not-print-literal-nil
+  (testing "no subcommand given at all produces a usage message, not \"nil\""
+    (let [msg (core/unknown-subcommand-message nil)]
+      (is (not (str/includes? msg "nil")))
+      (is (str/includes? msg "backup"))
+      (is (str/includes? msg "restore-test"))
+      (is (str/includes? msg "--db-test"))
+      (is (str/includes? msg "--b2-test"))
+      (is (str/includes? msg "--checksums")))))
+
+(deftest unknown-subcommand-message-for-typo-includes-what-was-typed
+  (testing "an actual unrecognized subcommand string is echoed back"
+    (let [msg (core/unknown-subcommand-message "bogus")]
+      (is (str/includes? msg "bogus"))
+      (is (str/includes? msg "backup")))))
+
+;; ---------------------------------------------------------------------------
 ;; -main exit code tests
 ;; ---------------------------------------------------------------------------
 
@@ -387,7 +519,7 @@
         (with-redefs [strategic-backup.config/load-config     (fn [_] config)
                       strategic-backup.config/validate-config (fn [c] c)
                       strategic-backup.config/resolve-secrets (fn [c] c)
-                      core/run-backup!                        (fn [_ _] nil)
+                      core/run-backup!                        (fn [_ _ _] nil)
                       core/exit!                              (fn [code] (reset! exit-code code))]
           (core/-main "backup"))
         (is (= 0 @exit-code))
@@ -406,6 +538,23 @@
                       core/exit! (fn [code] (reset! exit-code code))]
           (core/-main "backup"))
         (is (= 1 @exit-code))
+        (finally (delete-dir staging))))))
+
+(deftest main-defaults-to-backup-when-called-with-no-subcommand
+  (testing "-main with no args at all runs a backup, exits 0 — bare `java -jar
+            strategic-backup.jar` (e.g. from cron) just works"
+    (let [exit-code      (atom nil)
+          backup-called  (atom false)
+          staging        (make-temp-dir)]
+      (try
+        (with-redefs [strategic-backup.config/load-config     (fn [_] (assoc base-config :staging-dir (.getAbsolutePath staging)))
+                      strategic-backup.config/validate-config (fn [c] c)
+                      strategic-backup.config/resolve-secrets (fn [c] c)
+                      core/run-backup!                        (fn [_ _ _] (reset! backup-called true) nil)
+                      core/exit!                              (fn [code] (reset! exit-code code))]
+          (core/-main))
+        (is (true? @backup-called))
+        (is (= 0 @exit-code))
         (finally (delete-dir staging))))))
 
 (deftest main-db-test-exits-zero-on-success
@@ -466,4 +615,64 @@
                       core/exit!                               (fn [code] (reset! exit-code code))]
           (core/-main "--b2-test"))
         (is (= 1 @exit-code))
+        (finally (delete-dir staging))))))
+
+(deftest main-checksums-exits-zero-on-success
+  (testing "-main --checksums exits with code 0 when checksumming succeeds"
+    (let [exit-code (atom nil)
+          staging   (make-temp-dir)
+          config    (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.config/load-config     (fn [_] config)
+                      strategic-backup.config/validate-config (fn [c] c)
+                      strategic-backup.config/resolve-secrets (fn [c] c)
+                      strategic-backup.manifest/compute-file-checksums (fn [_ _] {})
+                      core/exit!                              (fn [code] (reset! exit-code code))]
+          (core/-main "--checksums"))
+        (is (= 0 @exit-code))
+        (finally (delete-dir staging))))))
+
+(deftest main-checksums-exits-one-on-failure
+  (testing "-main --checksums exits with code 1 when checksumming fails"
+    (let [exit-code (atom nil)
+          staging   (make-temp-dir)
+          config    (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.config/load-config     (fn [_] config)
+                      strategic-backup.config/validate-config (fn [c] c)
+                      strategic-backup.config/resolve-secrets (fn [c] c)
+                      strategic-backup.manifest/compute-file-checksums (fn [_ _] (throw (Exception. "boom")))
+                      core/exit!                              (fn [code] (reset! exit-code code))]
+          (core/-main "--checksums"))
+        (is (= 1 @exit-code))
+        (finally (delete-dir staging))))))
+
+(deftest main-parses-strict-checksums-flag-for-backup
+  (testing "-main parses --strict-checksums and threads it into run-backup!"
+    (let [captured (atom nil)
+          staging  (make-temp-dir)
+          config   (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.config/load-config     (fn [_] config)
+                      strategic-backup.config/validate-config (fn [c] c)
+                      strategic-backup.config/resolve-secrets (fn [c] c)
+                      core/run-backup!                        (fn [_ _ strict?] (reset! captured strict?) nil)
+                      core/exit!                               (fn [_] nil)]
+          (core/-main "backup" "--strict-checksums"))
+        (is (true? @captured))
+        (finally (delete-dir staging))))))
+
+(deftest main-parses-strict-checksums-flag-for-checksums
+  (testing "-main parses --strict-checksums and threads it into run-checksums!"
+    (let [captured (atom nil)
+          staging  (make-temp-dir)
+          config   (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.config/load-config     (fn [_] config)
+                      strategic-backup.config/validate-config (fn [c] c)
+                      strategic-backup.config/resolve-secrets (fn [c] c)
+                      core/run-checksums!                     (fn [_ strict?] (reset! captured strict?) {:ok true})
+                      core/exit!                               (fn [_] nil)]
+          (core/-main "--checksums" "--strict-checksums"))
+        (is (true? @captured))
         (finally (delete-dir staging))))))

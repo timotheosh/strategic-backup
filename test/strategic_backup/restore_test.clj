@@ -177,7 +177,7 @@
                                                                           nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
                       strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
-                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _] {:ok true :matched 1 :mismatched [] :missing []})
                       strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (reset! destroyed true) nil)]
           (restore/run-restore-test! config (ok-executor) false))
         (is (true? @destroyed))
@@ -200,7 +200,7 @@
                                                                           nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
                       strategic-backup.restore/run-restore-pipeline!    (fn [_ _] (swap! call-log conj :pipeline) nil)
-                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _] {:ok true :matched 1 :mismatched [] :missing []})
                       strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (swap! call-log conj :destroy) nil)]
           (restore/run-restore-test! config (ok-executor) false))
         ;; destroy must appear before the pipeline (pre-cleanup) AND after it (Req 8.6 cleanup)
@@ -218,10 +218,57 @@
                       strategic-backup.upload/list-remote            (fn [_ _ & _env] ["x-2026-01-01T000000.zfs.gz"])
                       strategic-backup.upload/download-archive!      (fn [_ _ _ _ & _env] nil)
                       strategic-backup.restore/run-restore-pipeline! (fn [_ _] nil)
-                      strategic-backup.verify/verify-file-checksums! (fn [_ _ _] (reset! verify-called true) {:ok true})
+                      strategic-backup.verify/verify-file-checksums! (fn [_ _] (reset! verify-called true) {:ok true})
                       strategic-backup.snapshot/destroy-dataset!     (fn [_ _] nil)]
           (restore/run-restore-test! config (ok-executor) true))
         (is (false? @verify-called))
+        (finally (delete-dir staging))))))
+
+;; ---------------------------------------------------------------------------
+;; run-restore-test! — per-stage timing (pipeline-timing spec)
+;; ---------------------------------------------------------------------------
+
+(deftest run-restore-test-times-every-major-stage-mode-1
+  (testing "mode 1 wraps every major stage in timing/time-stage! with the expected
+            keyword, in order — DB read kept distinct from the local EDN read"
+    (let [stages  (atom [])
+          staging (make-temp-dir)
+          config  (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.timing/time-stage!
+                      (fn [stage thunk] (swap! stages conj stage) (thunk))
+                      strategic-backup.db/fetch-latest-manifest         (fn [_ _] sample-manifest)
+                      strategic-backup.manifest/latest-local-edn        (fn [_] nil)
+                      strategic-backup.upload/download-archive!         (fn [_ _ _ dir & _env]
+                                                                          (spit (str dir "/" (:archive-file sample-manifest)) "data")
+                                                                          nil)
+                      strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
+                      strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _] {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.snapshot/destroy-dataset!        (fn [_ _] nil)]
+          (restore/run-restore-test! config (ok-executor) false))
+        (is (= [:db-fetch-manifest :archive-download :stream-checksum-verify
+                :restore-pipeline :file-checksum-verify :cleanup]
+               @stages))
+        (finally (delete-dir staging))))))
+
+(deftest run-restore-test-times-every-major-stage-mode-3
+  (testing "mode 3 skips both verify stages entirely — only 4 stages fire"
+    (let [stages  (atom [])
+          staging (make-temp-dir)
+          config  (assoc base-config :staging-dir (.getAbsolutePath staging))]
+      (try
+        (with-redefs [strategic-backup.timing/time-stage!
+                      (fn [stage thunk] (swap! stages conj stage) (thunk))
+                      strategic-backup.db/fetch-latest-manifest      (fn [_ _] nil)
+                      strategic-backup.manifest/latest-local-edn     (fn [_] nil)
+                      strategic-backup.upload/list-remote            (fn [_ _ & _env] ["x-2026-01-01T000000.zfs.gz"])
+                      strategic-backup.upload/download-archive!      (fn [_ _ _ _ & _env] nil)
+                      strategic-backup.restore/run-restore-pipeline! (fn [_ _] nil)
+                      strategic-backup.snapshot/destroy-dataset!     (fn [_ _] nil)]
+          (restore/run-restore-test! config (ok-executor) true))
+        (is (= [:db-fetch-manifest :archive-download :restore-pipeline :cleanup]
+               @stages))
         (finally (delete-dir staging))))))
 
 (deftest run-restore-test-passes-b2-rclone-env-to-upload-calls
@@ -281,7 +328,7 @@
                                                                           nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
                       strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
-                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] {:ok false :mismatched [{:path "./a.txt"}] :missing []})
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _] {:ok false :mismatched [{:path "./a.txt"}] :missing []})
                       strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (reset! destroyed true) nil)]
           (try
             (restore/run-restore-test! config (ok-executor) false)
@@ -339,7 +386,7 @@
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
                       strategic-backup.restore/run-restore-pipeline!    (fn [_ _] (swap! call-log conj :pipeline) nil)
                       strategic-backup.snapshot/load-key!               (fn [_ dataset _] (swap! call-log conj :load-key) dataset)
-                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] (swap! call-log conj :verify) {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _] (swap! call-log conj :verify) {:ok true :matched 1 :mismatched [] :missing []})
                       strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (swap! call-log conj :destroy) nil)]
           (restore/run-restore-test! config (ok-executor) false))
         (is (= [:destroy :pipeline :load-key :verify :destroy] @call-log))
@@ -360,7 +407,7 @@
                                                                           nil)
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
                       strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
-                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] (reset! verify-called true) {:ok true})
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _] (reset! verify-called true) {:ok true})
                       strategic-backup.snapshot/destroy-dataset!        (fn [_ _] (reset! destroyed true) nil)]
           (try
             (restore/run-restore-test! config (ok-executor) false)
@@ -419,7 +466,7 @@
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
                       strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
                       strategic-backup.snapshot/load-key!               (fn [_ dataset _] dataset)
-                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _] {:ok true :matched 1 :mismatched [] :missing []})
                       strategic-backup.snapshot/destroy-dataset!        (fn [_ _] nil)]
           (is (nil? (restore/run-restore-test! config (ok-executor) false))))
         (finally (delete-dir staging))))))
@@ -439,7 +486,7 @@
                       strategic-backup.manifest/compute-stream-checksum (fn [_ _] "sha256:abc123")
                       strategic-backup.restore/run-restore-pipeline!    (fn [_ _] nil)
                       strategic-backup.snapshot/load-key!               (fn [_ _ _] (reset! load-key-called true))
-                      strategic-backup.verify/verify-file-checksums!    (fn [_ _ _] {:ok true :matched 1 :mismatched [] :missing []})
+                      strategic-backup.verify/verify-file-checksums!    (fn [_ _] {:ok true :matched 1 :mismatched [] :missing []})
                       strategic-backup.snapshot/destroy-dataset!        (fn [_ _] nil)]
           (restore/run-restore-test! config (ok-executor) false))
         (is (false? @load-key-called))

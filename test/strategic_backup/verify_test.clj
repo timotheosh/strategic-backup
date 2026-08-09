@@ -41,14 +41,15 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest compute-actual-checksums-delegates-to-manifest
-  (testing "delegates to manifest/compute-file-checksums rather than reimplementing"
+  (testing "delegates to manifest/compute-file-checksums (strict? hardcoded false)
+            rather than reimplementing"
     (let [call-args (atom nil)]
       (with-redefs [strategic-backup.manifest/compute-file-checksums
-                    (fn [executor mountpoint]
-                      (reset! call-args [executor mountpoint])
+                    (fn [mountpoint strict?]
+                      (reset! call-args [mountpoint strict?])
                       {"./a.txt" "sha256:aaa"})]
-        (let [result (verify/compute-actual-checksums :fake-executor "/mnt/test")]
-          (is (= [:fake-executor "/mnt/test"] @call-args))
+        (let [result (verify/compute-actual-checksums "/mnt/test")]
+          (is (= ["/mnt/test" false] @call-args))
           (is (= {"./a.txt" "sha256:aaa"} result)))))))
 
 ;; ---------------------------------------------------------------------------
@@ -59,7 +60,7 @@
   (with-redefs [strategic-backup.manifest/compute-file-checksums
                 (fn [_ _] {"./a.txt" "sha256:aaa"})]
     (let [result (verify/verify-file-checksums!
-                  :fake-executor "/mnt/test"
+                  "/mnt/test"
                   {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}})]
       (is (true? (:ok result)))
       (is (= 1 (:matched result))))))
@@ -68,7 +69,7 @@
   (with-redefs [strategic-backup.manifest/compute-file-checksums
                 (fn [_ _] {"./a.txt" "sha256:wrong"})]
     (let [result (verify/verify-file-checksums!
-                  :fake-executor "/mnt/test"
+                  "/mnt/test"
                   {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}})]
       (is (false? (:ok result)))
       (is (= 1 (count (:mismatched result)))))))
@@ -77,7 +78,7 @@
   (with-redefs [strategic-backup.manifest/compute-file-checksums
                 (fn [_ _] {})]
     (let [result (verify/verify-file-checksums!
-                  :fake-executor "/mnt/test"
+                  "/mnt/test"
                   {:snapshot "tank/x@backup-1" :files {"./a.txt" "sha256:aaa"}})]
       (is (false? (:ok result)))
       (is (= ["./a.txt"] (:missing result))))))
