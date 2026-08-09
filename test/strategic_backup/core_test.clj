@@ -307,6 +307,30 @@
           (is (nil? (core/run-backup! config (ok-executor)))))
         (finally (delete-dir staging))))))
 
+;; ---------------------------------------------------------------------------
+;; B2 credentials — required for backup to function at all, but checked
+;; here at point of use rather than unconditionally at config-resolution
+;; time, so --db-test isn't blocked by a missing B2 credential
+;; ---------------------------------------------------------------------------
+
+(deftest backup-throws-before-any-work-when-no-b2-credentials
+  (testing "aborts with :stage :secrets, before ever creating a snapshot, when
+            neither RCLONE_CONFIG nor Infisical B2 credentials are configured"
+    (let [snapshot-called (atom false)
+          staging         (make-temp-dir)
+          config          (-> base-config
+                              (assoc :staging-dir (.getAbsolutePath staging))
+                              (assoc-in [:secrets :rclone-config] nil))]
+      (try
+        (with-redefs [strategic-backup.snapshot/create-snapshot! (fn [_ _] (reset! snapshot-called true) nil)]
+          (try
+            (core/run-backup! config (ok-executor))
+            (is false "expected ex-info to be thrown")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :secrets (:stage (ex-data e)))))))
+        (is (false? @snapshot-called))
+        (finally (delete-dir staging))))))
+
 (deftest backup-does-not-hang-waiting-for-a-slow-db-persist
   (testing "run-backup! returns promptly even when DB persist would take far longer than the await timeout"
     (let [staging (make-temp-dir)

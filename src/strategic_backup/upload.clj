@@ -16,6 +16,21 @@
   (->> (str/split-lines raw-output)
        (remove str/blank?)))
 
+(defn ensure-b2-credentials-present!
+  "Action. Throws ex-info {:stage :secrets} when neither an RCLONE_CONFIG
+   file path nor Infisical-derived B2 env vars are available. B2 access is
+   required for backup/restore-test to function at all, but this is
+   checked here — right before B2 is actually touched — rather than
+   unconditionally at config-resolution time, so a subcommand that never
+   needs B2 (e.g. --db-test) isn't blocked by a missing B2 credential.
+   config/resolve-b2-credential! never throws for exactly this reason;
+   this is where B2's requiredness is actually enforced."
+  [rclone-config b2-rclone-env]
+  (when (and (nil? rclone-config) (empty? b2-rclone-env))
+    (throw (ex-info "Unable to resolve B2 credential — no RCLONE_CONFIG and no Infisical B2 credentials configured"
+                    {:stage :secrets})))
+  nil)
+
 (defn rclone-copy!
   "Action. Uploads `local-path` to `remote` via `rclone copy` — never
    `rclone sync`, so existing remote objects are never deleted or

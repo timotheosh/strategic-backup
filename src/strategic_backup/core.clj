@@ -89,6 +89,7 @@
         ;; were resolved via Infisical, in which case this carries the
         ;; RCLONE_CONFIG_B2_* env vars for every rclone subprocess call below.
         b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})
+        rclone-config  (get-in config [:secrets :rclone-config])
         encryption-key (get-in config [:secrets :encryption-key])]
 
     ;; Validate retention count before doing any work
@@ -96,6 +97,11 @@
       (throw (ex-info "retention-count must be a positive integer"
                       {:stage           :config
                        :retention-count retention-count})))
+
+    ;; B2 access is required for backup to function at all — checked here,
+    ;; before any real work, rather than unconditionally at
+    ;; config-resolution time (see upload/ensure-b2-credentials-present!).
+    (upload/ensure-b2-credentials-present! rclone-config b2-rclone-env)
 
     (log/info "Starting backup" {:dataset dataset})
 

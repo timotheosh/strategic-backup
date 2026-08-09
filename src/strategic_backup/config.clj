@@ -32,19 +32,23 @@
 ;; Required secret env-var names
 ;; ---------------------------------------------------------------------------
 
+;; Nothing is unconditionally required here anymore. BACKUP_ENCRYPTION_KEY
+;; is only actually needed when the dataset turns out not to be
+;; ZFS-encrypted (checked at point of use via
+;; pipeline/ensure-encryption-key-present! in core.clj/restore.clj), and
+;; RCLONE_CONFIG is only actually needed by subcommands that touch B2 at
+;; all (checked via upload/ensure-b2-credentials-present! in core.clj's
+;; run-backup!/restore.clj's run-restore-test! — --db-test, for instance,
+;; never calls it, so a missing RCLONE_CONFIG doesn't block it). Neither
+;; status is knowable at config-resolution time — the former depends on a
+;; live `zfs get`, the latter on which subcommand is even running — so
+;; requiring either unconditionally here would abort runs that were never
+;; going to need them.
 (def ^:private required-secret-env-vars
-  ["RCLONE_CONFIG"])
+  [])
 
-;; BACKUP_ENCRYPTION_KEY is deliberately NOT unconditionally required here:
-;; it's only actually needed when the dataset turns out not to be
-;; ZFS-encrypted (openssl encryption is the fallback in that case). Since
-;; that status is only known once the pipeline actually runs — not at
-;; config-resolution time — the check is done at point of use instead, via
-;; pipeline/ensure-encryption-key-present! in core.clj (backup) and
-;; restore.clj (restore). Requiring it here unconditionally would abort
-;; every run for a ZFS-encryption-only deployment that never needs it.
 (def ^:private optional-secret-env-vars
-  ["PGCONNSTRING" "ZFS_ENCRYPTION_PASSPHRASE" "BACKUP_ENCRYPTION_KEY"])
+  ["PGCONNSTRING" "ZFS_ENCRYPTION_PASSPHRASE" "BACKUP_ENCRYPTION_KEY" "RCLONE_CONFIG"])
 
 ;; ---------------------------------------------------------------------------
 ;; Required :infisical config-map keys (infisical-secrets spec, Requirement 1)
@@ -195,10 +199,15 @@
    `infisical-config` is the :infisical config map, or nil when not in
    Infisical mode.
 
-   Unlike resolve-db-credential! above, this always fails loudly — B2
-   access is required for the backup pipeline to function at all. Throws
-   ex-info {:stage :secrets} when there's no legacy fallback and either
-   Infisical mode isn't active, or the Infisical fetch itself fails."
+   NEVER throws — B2 access is required for backup/restore-test to
+   function at all, but that requirement is enforced later, at the point
+   B2 is actually touched, via upload/ensure-b2-credentials-present! in
+   core.clj/restore.clj, not here. Checking eagerly here would abort
+   subcommands that never touch B2 at all (e.g. --db-test) over a
+   credential they were never going to need. A failure to resolve any
+   usable credential — no legacy fallback and either Infisical mode isn't
+   active, or the Infisical fetch itself fails for any reason — returns
+   {:mode :missing} instead of throwing."
   [env-map infisical-config]
   (let [env-value (get env-map "RCLONE_CONFIG")]
     (case (credential-source env-value (some? infisical-config))
@@ -206,13 +215,15 @@
       {:mode :rclone-config-file}
 
       :infisical
-      (let [key-id  (infisical/fetch-secret! infisical-config "B2_KEY_ID")
-            app-key (infisical/fetch-secret! infisical-config "B2_APPLICATION_KEY")]
-        {:mode :infisical :env (infisical/b2-rclone-env-vars key-id app-key)})
+      (try
+        (let [key-id  (infisical/fetch-secret! infisical-config "B2_KEY_ID")
+              app-key (infisical/fetch-secret! infisical-config "B2_APPLICATION_KEY")]
+          {:mode :infisical :env (infisical/b2-rclone-env-vars key-id app-key)})
+        (catch clojure.lang.ExceptionInfo _e
+          {:mode :missing}))
 
       :missing
-      (throw (ex-info "Unable to resolve B2 credential — no RCLONE_CONFIG and Infisical mode not active"
-                      {:stage :secrets :credential "B2_KEY_ID"})))))
+      {:mode :missing})))
 
 (defn resolve-zfs-passphrase!
   "Action (infisical-secrets spec, Requirement 6 — ZFS encryption
@@ -268,26 +279,29 @@
    :zfs-encryption-passphrase  (get env-map "ZFS_ENCRYPTION_PASSPHRASE")})
 
 (defn resolve-secrets
-  "Read required secrets from environment variables and attach them to config.
+  "Read secrets from environment variables and attach them to config.
 
-   Required env var:  RCLONE_CONFIG
-   Optional env vars: PGCONNSTRING (nil when absent — a warning is logged),
-                       BACKUP_ENCRYPTION_KEY, ZFS_ENCRYPTION_PASSPHRASE (nil
-                       when absent — no warning; both are only actually
-                       needed conditionally, checked at point of use in
-                       core.clj/restore.clj via
-                       pipeline/ensure-encryption-key-present! and
-                       restore/ensure-zfs-key-loaded!)
+   Nothing is unconditionally required here — every secret's actual
+   necessity depends on things this function can't know (a live ZFS
+   encryption check, or which subcommand is even running), so requiring
+   any of them eagerly would abort runs that were never going to need
+   them. Optional env vars: PGCONNSTRING (nil when absent — a warning is
+   logged), BACKUP_ENCRYPTION_KEY, ZFS_ENCRYPTION_PASSPHRASE, RCLONE_CONFIG
+   (nil when absent — no warning for these three; each is only actually
+   needed conditionally, checked at point of use in core.clj/restore.clj
+   via pipeline/ensure-encryption-key-present!,
+   restore/ensure-zfs-key-loaded!, and upload/ensure-b2-credentials-present!
+   respectively).
 
    Returns config with :secrets map attached:
      {:encryption-key             \"...\" (or nil)
-      :rclone-config              \"...\"
+      :rclone-config              \"...\" (or nil)
       :pg-conn-string             \"...\" (or nil)
       :zfs-encryption-passphrase  \"...\" (or nil)}
 
-   Throws ex-info with :missing-secrets listing ALL missing required secret
-   names when any required secret is absent. Secret values are NEVER included
-   in any log output or exception message.
+   This function itself never throws. Secret values are NEVER included in
+   any log output or exception message, here or at any of the point-of-use
+   enforcement sites above.
 
    When (infisical-mode? config) is true, this instead resolves
    :pg-conn-string, :b2-rclone-env, and :zfs-encryption-passphrase via
@@ -296,8 +310,11 @@
    stays env-var-only in both branches (openssl reads it directly from the
    process environment via -pass env:, so an Infisical-resolved value
    couldn't reach it anyway — see pipeline/encrypt-cmd). The legacy-only
-   branch below is untouched — byte-for-byte identical to this function's
-   behavior before the Infisical feature existed (Requirement 5.2)."
+   branch below still uses `required-secret-env-vars`/`missing-required-secrets`
+   as a general mechanism — currently an empty list, since nothing is
+   unconditionally required — kept as an extension point should a future
+   secret genuinely need to be required for every run regardless of
+   subcommand."
   [config]
   (if (infisical-mode? config)
     (let [encryption-key (getenv "BACKUP_ENCRYPTION_KEY")

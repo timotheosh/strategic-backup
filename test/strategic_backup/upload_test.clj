@@ -159,6 +159,29 @@
         (is (= {:env {}} @captured-opts))))))
 
 ;; ---------------------------------------------------------------------------
+;; ensure-b2-credentials-present! (RCLONE_CONFIG is only required for
+;; operations that actually touch B2 — backup and restore-test — checked
+;; here at point of use rather than unconditionally at config-resolution
+;; time, so e.g. --db-test isn't blocked by a missing B2 credential)
+;; ---------------------------------------------------------------------------
+
+(deftest ensure-b2-credentials-no-op-when-rclone-config-present
+  (testing "does not throw when an RCLONE_CONFIG file path is present, regardless of b2-rclone-env"
+    (is (nil? (upload/ensure-b2-credentials-present! "/etc/rclone.conf" {})))))
+
+(deftest ensure-b2-credentials-no-op-when-b2-rclone-env-present
+  (testing "does not throw when Infisical-derived b2-rclone-env is non-empty, regardless of rclone-config"
+    (is (nil? (upload/ensure-b2-credentials-present! nil {"RCLONE_CONFIG_B2_TYPE" "b2"})))))
+
+(deftest ensure-b2-credentials-throws-when-both-absent
+  (testing "throws ex-info :stage :secrets when neither RCLONE_CONFIG nor Infisical B2 credentials are available"
+    (try
+      (upload/ensure-b2-credentials-present! nil {})
+      (is false "expected ex-info to be thrown")
+      (catch clojure.lang.ExceptionInfo e
+        (is (= :secrets (:stage (ex-data e))))))))
+
+;; ---------------------------------------------------------------------------
 ;; download-archive!
 ;; ---------------------------------------------------------------------------
 

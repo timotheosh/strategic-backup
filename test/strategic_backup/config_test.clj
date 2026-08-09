@@ -207,7 +207,11 @@
 
 ;; ---------------------------------------------------------------------------
 ;; resolve-b2-credential! (infisical-secrets spec, Requirements 3.1-3.4)
-;; Always throws on failure — B2 access is required for the pipeline to work.
+;; NEVER throws — B2 is required for backup/restore-test to actually run,
+;; but that's enforced at point of use via upload/ensure-b2-credentials-present!,
+;; not here, so subcommands that don't touch B2 (e.g. --db-test) aren't
+;; blocked by config-resolution time. A failure to resolve any usable
+;; credential returns {:mode :missing} instead of throwing.
 ;; ---------------------------------------------------------------------------
 
 (deftest resolve-b2-credential-legacy-env-wins-without-calling-infisical
@@ -234,26 +238,18 @@
                 "RCLONE_CONFIG_B2_KEY"     "my-app-key"}
                (:env result)))))))
 
-(deftest resolve-b2-credential-throws-when-absent-and-not-infisical-mode
-  (testing "throws ex-info :stage :secrets when env absent and not in Infisical mode"
-    (try
-      (config/resolve-b2-credential! {} nil)
-      (is false "expected ex-info to be thrown")
-      (catch clojure.lang.ExceptionInfo e
-        (is (= :secrets (:stage (ex-data e))))))))
+(deftest resolve-b2-credential-missing-when-absent-and-not-infisical-mode
+  (testing "returns {:mode :missing} without throwing when env absent and not in Infisical mode"
+    (is (= {:mode :missing} (config/resolve-b2-credential! {} nil)))))
 
-(deftest resolve-b2-credential-throws-when-infisical-fetch-fails
-  (testing "throws (does not swallow) when the Infisical fetch itself fails, for any reason (Requirement 3.4)"
+(deftest resolve-b2-credential-missing-when-infisical-fetch-fails
+  (testing "returns {:mode :missing} without throwing when the Infisical fetch itself fails, for any reason"
     (with-redefs [infisical/fetch-secret!
                   (fn [_ secret-name]
                     (throw (ex-info (str "Infisical secret fetch failed for " secret-name)
                                     {:stage :secrets :secret-name secret-name
                                      :infisical-error :clj-infisical/secret-not-found})))]
-      (try
-        (config/resolve-b2-credential! {} {:project-id "proj-123"})
-        (is false "expected ex-info to be thrown")
-        (catch clojure.lang.ExceptionInfo e
-          (is (= :secrets (:stage (ex-data e)))))))))
+      (is (= {:mode :missing} (config/resolve-b2-credential! {} {:project-id "proj-123"}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; resolve-zfs-passphrase! (ZFS encryption passphrase, used to zfs load-key
@@ -299,17 +295,15 @@
 ;; resolve-secrets tests
 ;; ---------------------------------------------------------------------------
 
-(deftest resolve-secrets-reports-missing-rclone-config
-  (testing "throws ex-info with :missing-secrets when RCLONE_CONFIG is absent —
-            the sole required secret now that BACKUP_ENCRYPTION_KEY is
-            conditionally required (only when the dataset isn't ZFS-encrypted,
-            checked at point of use in core.clj/restore.clj, not here)"
+(deftest resolve-secrets-does-not-require-rclone-config
+  (testing "does not throw when RCLONE_CONFIG is absent — nothing is
+            unconditionally required at this layer anymore. B2 access is
+            enforced at point of use via upload/ensure-b2-credentials-present!
+            in core.clj/restore.clj, not here, so --db-test (which never
+            touches B2) isn't blocked by a missing RCLONE_CONFIG"
     (with-redefs [strategic-backup.config/getenv (constantly nil)]
-      (try
-        (config/resolve-secrets valid-config)
-        (is false "expected ex-info to be thrown")
-        (catch clojure.lang.ExceptionInfo e
-          (is (= ["RCLONE_CONFIG"] (:missing-secrets (ex-data e)))))))))
+      (let [result (config/resolve-secrets valid-config)]
+        (is (nil? (get-in result [:secrets :rclone-config])))))))
 
 (deftest resolve-secrets-does-not-require-backup-encryption-key
   (testing "does not throw when BACKUP_ENCRYPTION_KEY is absent but RCLONE_CONFIG
@@ -322,22 +316,22 @@
       (let [result (config/resolve-secrets valid-config)]
         (is (nil? (get-in result [:secrets :encryption-key])))))))
 
-(deftest resolve-secrets-does-not-expose-secret-values
-  (testing "exception message and ex-data contain only secret names, never values"
+(deftest resolve-secrets-never-throws-so-no-secret-can-leak-via-it
+  (testing "resolve-secrets has no exception path left that could leak a secret
+            value — every secret is optional at this layer now; the only
+            remaining conditional-requirement throws are
+            pipeline/ensure-encryption-key-present! and
+            upload/ensure-b2-credentials-present!, and neither ever puts the
+            actual secret value into their ex-data (see their own tests) —
+            here we just confirm resolve-secrets carries the real value
+            through without ever raising an exception around it"
     (with-redefs [strategic-backup.config/getenv
                   (fn [k]
                     (case k
                       "BACKUP_ENCRYPTION_KEY" "super-secret-key-abc123"
                       nil))]
-      (try
-        (config/resolve-secrets valid-config)
-        (is false "expected ex-info to be thrown")
-        (catch clojure.lang.ExceptionInfo e
-          ;; The exception message must not contain any secret value
-          (is (not (clojure.string/includes? (.getMessage e) "super-secret-key-abc123")))
-          ;; The ex-data must not contain any secret value
-          (let [data-str (pr-str (ex-data e))]
-            (is (not (clojure.string/includes? data-str "super-secret-key-abc123")))))))))
+      (let [result (config/resolve-secrets valid-config)]
+        (is (= "super-secret-key-abc123" (get-in result [:secrets :encryption-key])))))))
 
 (deftest resolve-secrets-attaches-secrets-to-config
   (testing "returns config with :secrets map when all required secrets are present"
@@ -441,8 +435,11 @@
       (let [result (config/resolve-secrets infisical-config)]
         (is (nil? (get-in result [:secrets :pg-conn-string])))))))
 
-(deftest resolve-secrets-infisical-mode-b2-failure-aborts
-  (testing "an Infisical B2 fetch failure with no legacy fallback DOES abort (Requirement 3.4)"
+(deftest resolve-secrets-infisical-mode-b2-failure-does-not-abort
+  (testing "an Infisical B2 fetch failure with no legacy fallback does not abort
+            resolve-secrets — :b2-rclone-env is simply {}. B2's actual
+            requiredness is enforced later, at point of use, via
+            upload/ensure-b2-credentials-present! in core.clj/restore.clj"
     (with-redefs [strategic-backup.config/getenv
                   (fn [k] (case k "BACKUP_ENCRYPTION_KEY" "enc-key" nil))
                   infisical/fetch-secret!
@@ -452,11 +449,8 @@
                       (throw (ex-info (str "Infisical secret fetch failed for " secret-name)
                                       {:stage :secrets :secret-name secret-name
                                        :infisical-error :clj-infisical/secret-not-found}))))]
-      (try
-        (config/resolve-secrets infisical-config)
-        (is false "expected ex-info to be thrown")
-        (catch clojure.lang.ExceptionInfo e
-          (is (= :secrets (:stage (ex-data e)))))))))
+      (let [result (config/resolve-secrets infisical-config)]
+        (is (= {} (get-in result [:secrets :b2-rclone-env])))))))
 
 (deftest resolve-secrets-infisical-mode-attaches-zfs-passphrase-via-infisical
   (testing "adds :zfs-encryption-passphrase via Infisical when the legacy env var is absent"
@@ -543,43 +537,28 @@
 ;; Validates: Requirements 9.3
 ;; ---------------------------------------------------------------------------
 
-;; The sole unconditionally-required secret. BACKUP_ENCRYPTION_KEY,
-;; PGCONNSTRING, and ZFS_ENCRYPTION_PASSPHRASE are all optional at this
-;; layer — they must never appear in :missing-secrets even when absent
-;; (BACKUP_ENCRYPTION_KEY's requiredness is conditional on the dataset's
-;; ZFS-encryption status, checked at point of use in core.clj/restore.clj).
-(def ^:private required-secret-names
-  ["RCLONE_CONFIG"])
+;; Every secret name this application ever reads. All of them are optional
+;; at the resolve-secrets layer now — RCLONE_CONFIG was the last
+;; unconditionally-required one, converted to conditional-at-point-of-use
+;; (upload/ensure-b2-credentials-present!) alongside BACKUP_ENCRYPTION_KEY
+;; (pipeline/ensure-encryption-key-present!) so that subcommands which don't
+;; need a given secret (e.g. --db-test never touching B2) aren't blocked by
+;; its absence. This replaces the old "reports all missing secrets" property
+;; (Requirement 9.3), which no longer applies now that nothing is
+;; unconditionally required here.
+(def ^:private all-secret-names
+  ["BACKUP_ENCRYPTION_KEY" "RCLONE_CONFIG" "PGCONNSTRING" "ZFS_ENCRYPTION_PASSPHRASE"])
 
-;; Generator: a non-empty subset of the required secret names to withhold
 (def gen-secrets-to-withhold
-  (gen/such-that seq
-                 (gen/fmap set
-                           (gen/not-empty (gen/list (gen/elements required-secret-names))))))
+  (gen/fmap set (gen/list (gen/elements all-secret-names))))
 
-;; **Validates: Requirements 9.3**
-(defspec secret-validation-reports-all-missing-secrets 100
-  (prop/for-all [config           gens/gen-config
-                 secrets-to-omit  gen-secrets-to-withhold]
-    ;; Build a mock env that has every required secret EXCEPT those in secrets-to-omit.
-    ;; PGCONNSTRING is always absent so we can confirm it never leaks into :missing-secrets.
-    (let [present-secrets (remove secrets-to-omit required-secret-names)
+(defspec resolve-secrets-never-throws-regardless-of-which-secrets-are-withheld 100
+  (prop/for-all [config          gens/gen-config
+                 secrets-to-omit gen-secrets-to-withhold]
+    (let [present-secrets (remove secrets-to-omit all-secret-names)
           mock-env        (into {} (map (fn [k] [k (str "mock-value-" k)]) present-secrets))]
       (with-redefs [strategic-backup.config/getenv (fn [k] (get mock-env k))]
-        (try
-          (config/resolve-secrets config)
-          ;; resolve-secrets must throw when any required secret is absent
-          false
-          (catch clojure.lang.ExceptionInfo e
-            (let [missing-reported (set (:missing-secrets (ex-data e)))]
-              ;; Every omitted required secret must appear in :missing-secrets
-              (and (every? #(contains? missing-reported %) secrets-to-omit)
-                   ;; PGCONNSTRING and BACKUP_ENCRYPTION_KEY are optional at
-                   ;; this layer — neither may ever appear in :missing-secrets
-                   (not (contains? missing-reported "PGCONNSTRING"))
-                   (not (contains? missing-reported "BACKUP_ENCRYPTION_KEY"))
-                   ;; :missing-secrets must be a non-empty vector/seq
-                   (seq missing-reported)))))))))
+        (map? (:secrets (config/resolve-secrets config)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Property 1 (infisical-secrets spec): Credential Source Decision Table

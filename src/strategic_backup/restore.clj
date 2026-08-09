@@ -120,8 +120,15 @@
         pg-conn-string (get-in config [:secrets :pg-conn-string])
         ;; infisical-secrets spec, Requirement 3.3 — see core.clj's run-backup!
         b2-rclone-env  (get-in config [:secrets :b2-rclone-env] {})
+        rclone-config  (get-in config [:secrets :rclone-config])
         zfs-passphrase (get-in config [:secrets :zfs-encryption-passphrase])
         encryption-key (get-in config [:secrets :encryption-key])
+
+        ;; B2 access is required for restore-test to function at all —
+        ;; checked here, before any real work (including fetching a
+        ;; manifest), rather than unconditionally at config-resolution
+        ;; time (see upload/ensure-b2-credentials-present!).
+        _              (upload/ensure-b2-credentials-present! rclone-config b2-rclone-env)
 
         pg-manifest    (db/fetch-latest-manifest pg-conn-string dataset)
         local-manifest (manifest/latest-local-edn staging-dir)
