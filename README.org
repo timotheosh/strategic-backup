@@ -92,6 +92,34 @@ Concurrency only affects wall-clock duration — the resulting checksums,
 which files are included/excluded, and ~--strict-checksums~'s abort
 behavior are all identical regardless of this value.
 
+*** Retention deletes are permanent (B2 hard-delete)
+:PROPERTIES:
+:CUSTOM_ID: retention-hard-delete
+:END:
+Archive filenames are unique per run (each embeds its own timestamp), so
+uploads never collide or overwrite each other — that's how keeping
+~:retention-count~ backups works at all. When retention enforcement
+removes an *old* backup past that count, it deletes it with
+~rclone delete --b2-hard-delete~, which permanently frees the storage
+immediately.
+
+This matters because ~rclone~'s B2 backend defaults to a *soft* delete —
+it hides the file but keeps the underlying bytes as a hidden version,
+which B2 retains indefinitely unless the bucket has its own lifecycle
+rule configured to purge hidden versions. Without ~--b2-hard-delete~,
+retention enforcement would look like it's working (the file disappears
+from ~rclone lsf~) while actually leaving every "deleted" backup's
+storage — and its cost — in place forever.
+
+If you were running an older version of this tool without
+~--b2-hard-delete~, this fix only applies to deletes going forward —
+it does not retroactively clean up whatever's already accumulated as
+hidden versions. To purge the existing backlog once, either run
+~rclone cleanup b2:<bucket>/<prefix>~ (B2-specific: permanently removes
+old/hidden versions), or set a lifecycle rule on the bucket itself
+(B2's web console, or ~rclone backend lifecycle~) to purge hidden files
+after N days.
+
 *** Secrets
 :PROPERTIES:
 :CUSTOM_ID: secrets
@@ -444,6 +472,25 @@ injection.
   ~rclone~ works and is well-tested here — but worth revisiting if
   ~rclone~ becomes a maintenance burden or a specific B2 API feature is
   needed.
+- *TODO: cache file checksums, skip re-hashing unchanged files.* Every
+  ~backup~/~restore-test~ run currently rehashes every file under
+  ~:dataset~'s mountpoint from scratch, every time. On a live deployment
+  with 131,298 files (a Syncthing sync folder), that took ~18-26 minutes
+  even with in-process hashing and concurrency — the underlying storage
+  (a 4-disk RAIDZ2 vdev) doesn't have the random-IOPS headroom to make
+  this much faster through more parallelism alone. Most files in a
+  workload like this don't change between consecutive nightly runs.
+  Caching each file's checksum keyed by path + mtime + size — skipping
+  the actual re-read/re-hash when both match a prior run, the same
+  change-detection heuristic ~rsync~/~borg~/~restic~ use — would avoid
+  disk I/O entirely for the large majority of files on a typical night.
+  20 minutes is tolerable for an unattended nightly job today, so this
+  isn't urgent, but it's the highest-leverage remaining optimization if
+  checksumming time becomes a problem again (e.g. the dataset grows).
+  Real design questions to work through before implementing: where the
+  cache lives (local file vs. a table alongside ~backup_manifests~),
+  what happens on cache/reality drift, and being explicit that trusting
+  mtime+size is a weaker guarantee than reading every byte every time.
 
 ** License
 :PROPERTIES:
