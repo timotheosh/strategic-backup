@@ -72,15 +72,25 @@
      nil)))
 
 (defn delete-remote!
-  "Action. Deletes `filename` from `remote` via `rclone delete`. See
-   `rclone-copy!` for `env` (Requirement 3.3).
+  "Action. Deletes `filename` from `remote` via `rclone delete --b2-hard-delete`.
+   See `rclone-copy!` for `env` (Requirement 3.3).
+
+   `--b2-hard-delete` is not optional: rclone's B2 backend defaults to a
+   soft-delete (hides the file, keeping the old version) unless told
+   otherwise, and B2 buckets keep hidden versions indefinitely absent a
+   bucket-level lifecycle rule — meaning retention enforcement would
+   look like it's freeing storage (the file vanishes from `rclone lsf`)
+   while the bytes, and the bill for them, stick around forever. Since
+   archive filenames are already unique per run, there's never a
+   legitimate prior version to preserve here.
+
    Never throws — returns {:ok true} on success or {:ok false :error
    \"...\"} on failure, so retention enforcement can continue past
    individual failures (Req 5.5)."
   ([executor remote filename] (delete-remote! executor remote filename {}))
   ([executor remote filename env]
    (let [target (str remote "/" filename)
-         result (shell/run-cmd executor "rclone" ["delete" target] {:env env})]
+         result (shell/run-cmd executor "rclone" ["delete" target "--b2-hard-delete"] {:env env})]
      (if (= 0 (:exit result))
        {:ok true}
        {:ok false :error (:err result)}))))

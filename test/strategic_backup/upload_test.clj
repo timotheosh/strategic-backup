@@ -228,6 +228,16 @@
     (let [result (upload/delete-remote! (ok-executor) "b2:bucket" "archive.zfs.gz.enc")]
       (is (= {:ok true} result)))))
 
+(deftest delete-remote-always-hard-deletes
+  (testing "passes --b2-hard-delete so a retention-enforcement delete actually
+            frees B2 storage immediately, rather than leaving a hidden version
+            that persists indefinitely without a bucket-level lifecycle rule
+            (rclone's B2 backend defaults to a soft-delete/hide otherwise)"
+    (let [captured-args (atom nil)]
+      (with-redefs [shell/run-cmd (fn [_ _ args _opts] (reset! captured-args args) {:exit 0 :out "" :err "" :cmd ""})]
+        (upload/delete-remote! nil "b2:bucket" "archive.zfs.gz.enc")
+        (is (some #{"--b2-hard-delete"} @captured-args))))))
+
 (deftest delete-remote-forwards-env-to-shell-run-cmd
   (testing "an explicit env map is forwarded into shell/run-cmd's opts"
     (let [captured-opts (atom nil)]
